@@ -30,10 +30,10 @@ const getToken = async () => {
 const vtuRequest = async (endpoint, params = "") => {
   const jwt = await getToken();
   console.log(jwt)
-//   const res = await fetch(`${BASE_URL}/api/v1/${endpoint}${params}`, {
-//     headers: { Authorization: `Bearer ${jwt}` }
-//   });
-//   return res.json();
+  const res = await fetch(`${BASE_URL}/api/v1/${endpoint}${params}`, {
+    headers: { Authorization: `Bearer ${jwt}` }
+  });
+  return res.json();
 };
 
 // ✅ Example functions

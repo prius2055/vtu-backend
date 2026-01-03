@@ -1,15 +1,23 @@
 const express = require('express');
 const cors = require('cors');
-const routes = require('./routes/auth');
+const authRoutes = require('./routes/auth');
 const vtuRoutes = require('./routes/vtuRoutes');
+const walletRoutes = require('./routes/walletRoutes');
+const transactionRoutes = require('./routes/transactionRoutes');
+
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-app.use('/api/v1', routes);
-app.use("/api/vtu", vtuRoutes);
+
+// Routes
+app.use('/api/v1', authRoutes);
+app.use("/api/v1/vtu", vtuRoutes);
+app.use('/api/v1/wallet', walletRoutes);
+app.use('/api/v1/transactions', transactionRoutes);
 
 
 module.exports = app;
