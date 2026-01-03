@@ -43,7 +43,8 @@ const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
       email: req.user.email,
       amount: amount * 100,
       currency: 'NGN',
-      callback_url: 'http://localhost:3000/funding/verify',
+      callback_url: 'https://geotechtest.vercel.app/funding/verify',
+      // callback_url: 'http://localhost:3000/funding/verify',
       metadata: {
         userId: req.user._id.toString()
       }
