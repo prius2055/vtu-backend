@@ -38,13 +38,14 @@
 
 const express = require('express');
 const router = express.Router();
-const { getBalance, buyAirtime, buyData, getDataPlans, rechargeMeter } = require('../controllers/vtuController');
+const { getBalance, buyAirtime, buyData, getDataPlans, rechargeMeter, validateMeter } = require('../controllers/vtuController');
 const protect = require('../middleware/auth');
 
 router.get('/balance', protect, getBalance);
 router.get('/data-plans', getDataPlans);
 router.post('/buy-data', protect, buyData);
 router.post('/buy-airtime', protect, buyAirtime);
+router.post('/validate-meter', protect, validateMeter);
 router.post('/recharge-meter', protect, rechargeMeter);
 
 module.exports = router;
