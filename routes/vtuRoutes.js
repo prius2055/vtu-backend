@@ -34,18 +34,27 @@
 
 // module.exports = router;
 
-
-
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const { getBalance, buyAirtime, buyData, getDataPlans, rechargeMeter, validateMeter } = require('../controllers/vtuController');
-const protect = require('../middleware/auth');
+const {
+  getBalance,
+  buyAirtime,
+  buyData,
+  getDataPlans,
+  rechargeMeter,
+  validateMeter,
+  validateCable,
+  rechargeCable,
+} = require("../controllers/vtuController");
+const protect = require("../middleware/auth");
 
-router.get('/balance', protect, getBalance);
-router.get('/data-plans', getDataPlans);
-router.post('/buy-data', protect, buyData);
-router.post('/buy-airtime', protect, buyAirtime);
-router.post('/validate-meter', protect, validateMeter);
-router.post('/recharge-meter', protect, rechargeMeter);
+router.get("/balance", protect, getBalance);
+router.get("/data-plans", getDataPlans);
+router.post("/buy-data", protect, buyData);
+router.post("/buy-airtime", protect, buyAirtime);
+router.post("/validate-meter", protect, validateMeter);
+router.post("/recharge-meter", protect, rechargeMeter);
+router.post("/validate-cable", protect, validateCable);
+router.post("/recharge-cable", protect, rechargeCable);
 
 module.exports = router;

@@ -448,13 +448,6 @@ const validateMeter = async (req, res) => {
     // console.log('📥 New Payload:', payload);
     const userId = req.user._id;
 
-    console.log("📥 Incoming Payload:", {
-      disco_name,
-      meter_number,
-      MeterType,
-      amount,
-    });
-
     /* --------------------------------------------------
      * 2️⃣ Validate request payload
      * -------------------------------------------------- */
@@ -473,7 +466,7 @@ const validateMeter = async (req, res) => {
 
       return res.status(400).json({
         status: "fail",
-        message: "Invalid amount",
+        message: "Invalid amount. Minimum = ₦500",
       });
     }
 
@@ -481,7 +474,7 @@ const validateMeter = async (req, res) => {
      * 3️⃣ Validate meter details
      * -------------------------------------------------- */
     try {
-      console.log("🚀 Calling meter validate API...");
+      // console.log("🚀 Calling meter validate API...");
 
       const response = await fetch(
         `https://geodnatechsub.com/api/validatemeter?meternumber=${meter_number}&disconame=${disco_name}&mtype=${MeterType}`,
@@ -495,7 +488,6 @@ const validateMeter = async (req, res) => {
       );
 
       const rawText = await response.text();
-      console.log("📩 Raw Meter validate :", rawText);
 
       let result;
       try {
@@ -503,8 +495,6 @@ const validateMeter = async (req, res) => {
       } catch (err) {
         throw new Error("VTU returned non-JSON response");
       }
-
-      console.log("📊 Parsed VTU Response:", result);
 
       /* --------------------------------------------------
        * 6️⃣ Detect VTU failure
@@ -543,8 +533,207 @@ const validateMeter = async (req, res) => {
   }
 };
 
+// const rechargeMeter = async (req, res) => {
+//   try {
+//     const {
+//       disco_name,
+//       amount,
+//       meter_number,
+//       MeterType,
+//       customer_number,
+//       meter_name,
+//       meter_address,
+//     } = req.body;
+//     const userId = req.user._id;
+
+//     console.log("📥 Incoming Payload:", {
+//       disco_name,
+//       amount,
+//       meter_number,
+//       MeterType,
+//       customer_number,
+//       meter_name,
+//       meter_address,
+//     });
+
+//     // Validation
+//     if (
+//       !disco_name ||
+//       !meter_number ||
+//       !amount ||
+//       !MeterType ||
+//       !customer_number ||
+//       !meter_name ||
+//       !meter_address
+//     ) {
+//       return res.status(400).json({
+//         status: "fail",
+//         message:
+//           "Missing required fields: disco_name, meter_number, amount, customer_number, MeterType, meter_name, meter_address",
+//       });
+//     }
+
+//     // Validate amount is a positive number
+//     if (isNaN(amount) || amount <= 0) {
+//       return res.status(400).json({
+//         status: "fail",
+//         message: "Invalid amount",
+//       });
+//     }
+
+//     // Check wallet balance
+//     const wallet = await Wallet.findOne({ user: userId });
+
+//     if (!wallet) {
+//       return res.status(404).json({
+//         status: "fail",
+//         message: "Wallet not found",
+//       });
+//     }
+
+//     if (wallet.balance < amount) {
+//       return res.status(400).json({
+//         status: "fail",
+//         message: `Insufficient wallet balance. Available: ₦${wallet.balance}, Required: ₦${amount}`,
+//       });
+//     }
+
+//     // Generate unique reference
+//     const reference = `METER_${Date.now()}_${userId.toString().slice(-6)}`;
+
+//     // Create transaction record with pending status
+//     const transaction = await Transaction.create({
+//       user: userId,
+//       type: "meter recharge",
+//       disco: disco_name,
+//       meter: meter_number,
+//       name: meter_name,
+//       address: meter_address,
+//       phone: customer_number,
+//       amount,
+//       meterType: MeterType,
+//       reference,
+//       status: "pending",
+//       description: `${disco_name} Meter recharge for ${meter_number} of ${meter_address} belonging to ${meter_name}`,
+//     });
+
+//     try {
+//       // Call geodnatechsub.com API 1
+//       console.log("🔵 Calling VTU API...");
+
+//       const response = await fetch(
+//         "https://geodnatechsub.com/api/billpayment/",
+//         {
+//           method: "POST",
+//           headers: {
+//             "Content-Type": "application/json",
+//             Authorization: `Token ${process.env.API_TOKEN}`,
+//           },
+//           body: JSON.stringify({
+//             disco_name,
+//             amount,
+//             meter_number,
+//             MeterType,
+//           }),
+//         }
+//       );
+
+//       // Check if response is ok
+//       if (!response.ok) {
+//         throw new Error(`VTU API returned status ${response.status}`);
+//       }
+
+//       const result = await response.json();
+
+//       console.log("📊 Parsed VTU Response:", result);
+
+//       // FIXED: Changed from 'vtuData' to 'result'
+//       if (result.status === "success" || result.Status === "successful") {
+//         // Update transaction to success
+//         transaction.status = "success";
+//         transaction.reference = result.orderid || result.api_response;
+//         transaction.vtuResponse = result;
+//         await transaction.save();
+
+//         // Deduct from wallet atomically
+//         const updatedWallet = await Wallet.findOneAndUpdate(
+//           { user: userId },
+//           {
+//             $inc: {
+//               balance: -amount,
+//               totalSpent: amount,
+//             },
+//           },
+//           { new: true }
+//         );
+
+//         return res.status(200).json({
+//           status: "success",
+//           message: "Data purchase successful",
+//           data: {
+//             transaction: {
+//               id: transaction._id,
+//               reference: transaction.reference,
+//               type: transaction.type,
+//               disco: transaction.disco,
+//               meter: transaction.meter,
+//               phone: transaction.phone,
+//               name: transaction.name,
+//               address: transaction.address,
+//               amount: transaction.amount,
+//               status: transaction.status,
+//             },
+//             wallet: {
+//               balance: updatedWallet.balance,
+//               totalSpent: updatedWallet.totalSpent,
+//             },
+//             vtu_response: result,
+//           },
+//         });
+//       } else {
+//         // Update transaction to failed
+//         transaction.status = "failed";
+//         transaction.vtuResponse = result;
+//         await transaction.save();
+
+//         return res.status(400).json({
+//           status: "fail",
+//           message: result.message || result.Message || "Meter recharge failed",
+//           error: result,
+//         });
+//       }
+//     } catch (vtuError) {
+//       // Update transaction to failed
+//       transaction.status = "failed";
+//       transaction.vtuResponse = {
+//         error: vtuError.message,
+//         timestamp: new Date(),
+//       };
+//       await transaction.save();
+
+//       return res.status(500).json({
+//         status: "fail",
+//         message: "Failed to connect to VTU service",
+//         error: vtuError.message,
+//       });
+//     }
+//   } catch (error) {
+//     return res.status(500).json({
+//       status: "fail",
+//       message:
+//         error.message || "An error occurred while processing your request",
+//     });
+//   }
+// };
+
 const rechargeMeter = async (req, res) => {
+  console.log("================= 🔌 METER RECHARGE START =================");
+
   try {
+    /** 🔹 RAW REQUEST */
+    console.log("📥 RAW req.body:", req.body);
+    console.log("👤 req.user:", req.user);
+
     const {
       disco_name,
       amount,
@@ -554,9 +743,22 @@ const rechargeMeter = async (req, res) => {
       meter_name,
       meter_address,
     } = req.body;
-    const userId = req.user._id;
 
-    // Validation
+    const userId = req.user?._id;
+
+    /** 🔹 PARSED PAYLOAD */
+    console.log("📦 Parsed Payload:", {
+      disco_name,
+      amount,
+      meter_number,
+      MeterType,
+      customer_number,
+      meter_name,
+      meter_address,
+      userId,
+    });
+
+    /** 🔹 VALIDATION */
     if (
       !disco_name ||
       !meter_number ||
@@ -566,25 +768,36 @@ const rechargeMeter = async (req, res) => {
       !meter_name ||
       !meter_address
     ) {
+      console.error("❌ Validation failed: Missing fields");
+
       return res.status(400).json({
         status: "fail",
         message:
           "Missing required fields: disco_name, meter_number, amount, customer_number, MeterType, meter_name, meter_address",
+        received: req.body,
       });
     }
 
-    // Validate amount is a positive number
     if (isNaN(amount) || amount <= 0) {
+      console.error("❌ Invalid amount:", amount);
+
       return res.status(400).json({
         status: "fail",
         message: "Invalid amount",
+        receivedAmount: amount,
       });
     }
 
-    // Check wallet balance
+    /** 🔹 WALLET CHECK */
+    console.log("🔍 Fetching wallet for user:", userId);
+
     const wallet = await Wallet.findOne({ user: userId });
 
+    console.log("💰 Wallet:", wallet);
+
     if (!wallet) {
+      console.error("❌ Wallet not found");
+
       return res.status(404).json({
         status: "fail",
         message: "Wallet not found",
@@ -592,19 +805,24 @@ const rechargeMeter = async (req, res) => {
     }
 
     if (wallet.balance < amount) {
+      console.error("❌ Insufficient balance");
+
       return res.status(400).json({
         status: "fail",
-        message: `Insufficient wallet balance. Available: ₦${wallet.balance}, Required: ₦${amount}`,
+        message: `Insufficient wallet balance`,
+        available: wallet.balance,
+        required: amount,
       });
     }
 
-    // Generate unique reference
+    /** 🔹 TRANSACTION INIT */
     const reference = `METER_${Date.now()}_${userId.toString().slice(-6)}`;
 
-    // Create transaction record with pending status
+    console.log("🧾 Creating pending transaction:", reference);
+
     const transaction = await Transaction.create({
       user: userId,
-      type: "Meter Recharge",
+      type: "meter recharge",
       disco: disco_name,
       meter: meter_number,
       name: meter_name,
@@ -614,97 +832,310 @@ const rechargeMeter = async (req, res) => {
       meterType: MeterType,
       reference,
       status: "pending",
-      description: `${disco_name} Meter recharge for ${meter_number} of ${meter_address} belonging to ${meter_name}`,
+      description: `${disco_name} Meter recharge for ${meter_number}`,
     });
 
-    try {
-      // Call geodnatechsub.com API 1
-      console.log("🔵 Calling VTU API...");
+    console.log("🧾 Transaction created:", transaction._id);
 
-      const response = await fetch("https://geodnatechsub.com/api/data/", {
+    /** 🔹 VTU API CALL */
+    const vtuPayload = {
+      disco_name,
+      amount,
+      meter_number,
+      MeterType,
+    };
+
+    console.log("🌍 VTU REQUEST PAYLOAD:", vtuPayload);
+    console.log("🔑 Using API TOKEN:", process.env.API_TOKEN ? "YES" : "NO");
+
+    let response;
+    let rawText;
+    let result;
+
+    try {
+      response = await fetch("https://geodnatechsub.com/api/billpayment/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Token ${process.env.API_TOKEN}`,
         },
-        body: JSON.stringify({
-          disco_name,
-          amount,
-          meter_number,
-          MeterType,
-        }),
+        body: JSON.stringify(vtuPayload),
       });
 
-      // Check if response is ok
-      if (!response.ok) {
-        throw new Error(`VTU API returned status ${response.status}`);
+      console.log("🌐 VTU HTTP STATUS:", response.status);
+
+      rawText = await response.text();
+      console.log("📄 VTU RESPONSE:", rawText);
+
+      try {
+        result = JSON.parse(rawText);
+      } catch (parseErr) {
+        console.error("❌ VTU RESPONSE NOT JSON");
+        throw new Error("Invalid VTU JSON response");
+      }
+    } catch (networkErr) {
+      console.error("❌ VTU NETWORK ERROR:", networkErr);
+
+      transaction.status = "failed";
+      transaction.vtuResponse = {
+        error: networkErr.message,
+        raw: rawText,
+      };
+      await transaction.save();
+
+      return res.status(502).json({
+        status: "fail",
+        message: "VTU service unreachable",
+        error: networkErr.message,
+      });
+    }
+
+    console.log("📊 PARSED VTU RESPONSE:", result);
+
+    /** 🔹 VTU RESULT HANDLING */
+    if (result.status === "success" || result.Status === "successful") {
+      console.log("✅ VTU SUCCESS");
+
+      transaction.status = "success";
+      transaction.reference = result.orderid || transaction.reference;
+      transaction.vtuResponse = result;
+      await transaction.save();
+
+      console.log("💸 Deducting wallet balance:", amount);
+
+      const updatedWallet = await Wallet.findOneAndUpdate(
+        { user: userId },
+        { $inc: { balance: -amount, totalSpent: amount } },
+        { new: true }
+      );
+
+      console.log("💰 Wallet after deduction:", updatedWallet);
+
+      return res.status(200).json({
+        status: true,
+        message: "Meter recharge successful",
+        data: {
+          transaction,
+          wallet: {
+            balance: updatedWallet.balance,
+            totalSpent: updatedWallet.totalSpent,
+          },
+          vtu_response: result,
+        },
+      });
+    }
+
+    /** 🔹 VTU FAILURE */
+    console.error("❌ VTU FAILED RESPONSE");
+
+    transaction.status = "failed";
+    transaction.vtuResponse = result;
+    await transaction.save();
+
+    return res.status(400).json({
+      status: "fail",
+      message: result.message || result.Message || "Meter recharge failed",
+      vtu_response: result,
+    });
+  } catch (error) {
+    console.error("🔥 UNHANDLED SERVER ERROR:", error);
+
+    return res.status(500).json({
+      status: "fail",
+      message: error.message || "Internal server error",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  } finally {
+    console.log("================= 🔌 METER RECHARGE END =================");
+  }
+};
+// const validateCable = async (req, res) => {
+//   try {
+//     /* --------------------------------------------------
+//      * 1️⃣ Extract & log request payload
+//      * -------------------------------------------------- */
+//     const { cableName, iucNumber } = req.body;
+
+//     console.log("📥 New Payload:", cableName, iucNumber);
+//     const userId = req.user._id;
+
+//     /* --------------------------------------------------
+//      * 2️⃣ Validate request payload
+//      * -------------------------------------------------- */
+//     if (!cableName || !iucNumber) {
+//       console.error("❌ Validation Error: Missing fields");
+
+//       return res.status(400).json({
+//         status: "fail",
+//         message: "Missing required fields: cable name, smart card / IUC number",
+//       });
+//     }
+
+//     // if (isNaN(amount) || amount <= 0) {
+//     //   console.error("❌ Validation Error: Invalid amount", amount);
+
+//     //   return res.status(400).json({
+//     //     status: "fail",
+//     //     message: "Invalid amount. Minimum = ₦500",
+//     //   });
+//     // }
+
+//     /* --------------------------------------------------
+//      * 3️⃣ Validate meter details
+//      * -------------------------------------------------- */
+//     try {
+//       console.log("🚀 Calling meter validate API...");
+
+//       const response = await fetch(
+//         `https://geodnatechsub.com/api/validateiuc?smart_card_number=${iucNumber}&cablename=${cableName}`,
+//         {
+//           // method: 'POST',
+//           headers: {
+//             "Content-Type": "application/json",
+//             Authorization: `Token ${process.env.API_TOKEN}`,
+//           },
+//         }
+//       );
+
+//       const rawText = await response.text();
+
+//       console.log("Raw text", rawText);
+
+//       let result;
+//       try {
+//         result = JSON.parse(rawText);
+//       } catch (err) {
+//         throw new Error("VTU returned non-JSON response");
+//       }
+
+//       /* --------------------------------------------------
+//        * 6️⃣ Detect VTU failure
+//        * -------------------------------------------------- */
+
+//       if (result.invalid) {
+//         console.error("❌ VTU rejected request:", result);
+
+//         return res.status(400).json({
+//           status: "fail",
+//           message: result.message || result.error || "IUC validation failed",
+//           vtu_error: result,
+//         });
+//       }
+
+//       return res.status(200).json({
+//         status: true,
+//         message: "IUC validated successfully",
+//         result,
+//       });
+//     } catch (vtuError) {
+//       console.error("🔥 VTU API ERROR:", vtuError.message);
+//       return res.status(500).json({
+//         status: "fail",
+//         message: "Failed to connect to VTU service",
+//         error: vtuError.message,
+//       });
+//     }
+//   } catch (error) {
+//     console.error("🔥 Validation error:", error);
+
+//     return res.status(500).json({
+//       status: "fail",
+//       message: error.message || "An unexpected error occurred",
+//     });
+//   }
+// };
+
+const validateCable = async (req, res) => {
+  console.log("🟢 ===== VALIDATE CABLE START =====");
+
+  try {
+    /* --------------------------------------------------
+     * 1️⃣ Extract & log request payload
+     * -------------------------------------------------- */
+    console.log("📥 RAW req.body:", req.body);
+    console.log("📥 RAW req.headers:", req.headers);
+
+    const { cableName, iucNumber } = req.body;
+    const userId = req.user?._id;
+
+    console.log("📦 Extracted Payload:", {
+      cableName,
+      iucNumber,
+    });
+
+    console.log("👤 Authenticated User ID:", userId || "NOT FOUND");
+
+    /* --------------------------------------------------
+     * 2️⃣ Validate request payload
+     * -------------------------------------------------- */
+    if (!cableName || !iucNumber) {
+      console.error("❌ Validation Error: Missing fields", {
+        cableName,
+        iucNumber,
+      });
+
+      return res.status(400).json({
+        status: "fail",
+        message: "Missing required fields: cable name, smart card / IUC number",
+      });
+    }
+
+    /* --------------------------------------------------
+     * 3️⃣ Call VTU IUC validation API
+     * -------------------------------------------------- */
+    try {
+      const vtuUrl = `https://geodnatechsub.com/api/validateiuc?smart_card_number=${iucNumber}&cablename=${cableName}`;
+
+      console.log("🚀 Calling VTU Validate IUC API...");
+      console.log("🌐 VTU URL:", vtuUrl);
+      console.log("🔑 Using API TOKEN:", process.env.API_TOKEN ? "YES" : "NO");
+
+      const response = await fetch(vtuUrl, {
+        headers: {
+          Authorization: `Token ${process.env.API_TOKEN}`,
+        },
+      });
+
+      console.log("🌐 VTU HTTP STATUS:", response.status);
+
+      const rawText = await response.text();
+      console.log("📄 RAW VTU RESPONSE:", rawText);
+
+      let result;
+      try {
+        result = JSON.parse(rawText);
+        console.log("📊 PARSED VTU RESPONSE:", result);
+      } catch (err) {
+        console.error("❌ VTU RESPONSE NOT JSON");
+        throw new Error("VTU returned non-JSON response");
       }
 
-      const result = await response.json();
-
-      // FIXED: Changed from 'vtuData' to 'result'
-      if (result.status === "success" || result.Status === "successful") {
-        // Update transaction to success
-        transaction.status = "success";
-        transaction.reference = result.orderid || result.api_response;
-        transaction.vtuResponse = result;
-        await transaction.save();
-
-        // Deduct from wallet atomically
-        const updatedWallet = await Wallet.findOneAndUpdate(
-          { user: userId },
-          {
-            $inc: {
-              balance: -amount,
-              totalSpent: amount,
-            },
-          },
-          { new: true }
-        );
-
-        return res.status(200).json({
-          status: "success",
-          message: "Data purchase successful",
-          data: {
-            transaction: {
-              id: transaction._id,
-              reference: transaction.reference,
-              type: transaction.type,
-              disco: transaction.disco,
-              meter: transaction.meter,
-              phone: transaction.phone,
-              name: transaction.name,
-              address: transaction.address,
-              amount: transaction.amount,
-              status: transaction.status,
-            },
-            wallet: {
-              balance: updatedWallet.balance,
-              totalSpent: updatedWallet.totalSpent,
-            },
-            vtu_response: result,
-          },
-        });
-      } else {
-        // Update transaction to failed
-        transaction.status = "failed";
-        transaction.vtuResponse = result;
-        await transaction.save();
+      /* --------------------------------------------------
+       * 4️⃣ Detect VTU failure
+       * -------------------------------------------------- */
+      if (result.invalid === true) {
+        console.error("❌ VTU rejected request:", result);
 
         return res.status(400).json({
           status: "fail",
-          message: result.message || result.Message || "Meter recharge failed",
-          error: result,
+          message: result.message || result.error || "IUC validation failed",
+          vtu_error: result,
         });
       }
+
+      /* --------------------------------------------------
+       * 5️⃣ Success response
+       * -------------------------------------------------- */
+      console.log("✅ IUC VALIDATION SUCCESS");
+
+      return res.status(200).json({
+        status: true,
+        message: "IUC validated successfully",
+        result,
+      });
     } catch (vtuError) {
-      // Update transaction to failed
-      transaction.status = "failed";
-      transaction.vtuResponse = {
-        error: vtuError.message,
-        timestamp: new Date(),
-      };
-      await transaction.save();
+      console.error("🔥 VTU API ERROR:", vtuError.message);
+      console.error("🔥 VTU STACK TRACE:", vtuError.stack);
 
       return res.status(500).json({
         status: "fail",
@@ -713,11 +1144,232 @@ const rechargeMeter = async (req, res) => {
       });
     }
   } catch (error) {
+    console.error("🔥 CONTROLLER ERROR:", error.message);
+    console.error("🔥 STACK TRACE:", error.stack);
+
     return res.status(500).json({
       status: "fail",
-      message:
-        error.message || "An error occurred while processing your request",
+      message: error.message || "An unexpected error occurred",
     });
+  } finally {
+    console.log("🟡 ===== VALIDATE CABLE END =====");
+  }
+};
+
+const rechargeCable = async (req, res) => {
+  console.log("================= 🔌 CABLE RECHARGE START =================");
+
+  try {
+    /** 🔹 RAW REQUEST */
+    console.log("📥 RAW req.body:", req.body);
+    console.log("👤 req.user:", req.user);
+
+    const {
+      cablename,
+      cableplan,
+      smart_card_number,
+      amount,
+      customerName,
+      customerNumber,
+    } = req.body;
+
+    const userId = req.user?._id;
+
+    /** 🔹 PARSED PAYLOAD */
+    console.log("📦 Parsed Payload:", {
+      cablename,
+      cableplan,
+      smart_card_number,
+      amount,
+      customerName,
+      customerNumber,
+    });
+
+    /** 🔹 VALIDATION */
+    if (
+      !cablename ||
+      !cableplan ||
+      !smart_card_number ||
+      !amount ||
+      !customerName ||
+      !customerNumber
+    ) {
+      console.error("❌ Validation failed: Missing fields");
+
+      return res.status(400).json({
+        status: "fail",
+        message:
+          "Missing required fields: cablename, cableplan,smart_card_number,amount,customerName,customerNumber,",
+        received: req.body,
+      });
+    }
+
+    if (isNaN(amount) || amount <= 0) {
+      console.error("❌ Invalid amount:", amount);
+
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid amount",
+        receivedAmount: amount,
+      });
+    }
+
+    /** 🔹 WALLET CHECK */
+    console.log("🔍 Fetching wallet for user:", userId);
+
+    const wallet = await Wallet.findOne({ user: userId });
+
+    console.log("💰 Wallet:", wallet);
+
+    if (!wallet) {
+      console.error("❌ Wallet not found");
+
+      return res.status(404).json({
+        status: "fail",
+        message: "Wallet not found",
+      });
+    }
+
+    if (wallet.balance < amount) {
+      console.error("❌ Insufficient balance");
+
+      return res.status(400).json({
+        status: "fail",
+        message: `Insufficient wallet balance`,
+        available: wallet.balance,
+        required: amount,
+      });
+    }
+
+    /** 🔹 TRANSACTION INIT */
+    const reference = `CABLE_${Date.now()}_${userId.toString().slice(-6)}`;
+
+    console.log("🧾 Creating pending transaction:", reference);
+    const transaction = await Transaction.create({
+      user: userId,
+      type: "cable recharge",
+      cable: cablename,
+      IUC: smart_card_number,
+      plan: cableplan,
+      amount,
+      name: customerName,
+      phone: customerNumber,
+      reference,
+      status: "pending",
+      description: `${cable} Cable recharge OF ${iucNumber} for ${customerName}`,
+    });
+
+    console.log("🧾 Transaction created:", transaction._id);
+
+    /** 🔹 VTU API CALL */
+    const vtuPayload = {
+      cablename,
+      cableplan,
+      smart_card_number,
+    };
+
+    console.log("🌍 VTU REQUEST PAYLOAD:", vtuPayload);
+    console.log("🔑 Using API TOKEN:", process.env.API_TOKEN ? "YES" : "NO");
+
+    let response;
+    let rawText;
+    let result;
+
+    try {
+      response = await fetch("https://geodnatechsub.com/api/billpayment/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Token ${process.env.API_TOKEN}`,
+        },
+        body: JSON.stringify(vtuPayload),
+      });
+
+      console.log("🌐 VTU HTTP STATUS:", response.status);
+
+      rawText = await response.text();
+      console.log("📄 VTU RESPONSE:", rawText);
+
+      try {
+        result = JSON.parse(rawText);
+      } catch (parseErr) {
+        console.error("❌ VTU RESPONSE NOT JSON");
+        throw new Error("Invalid VTU JSON response");
+      }
+    } catch (networkErr) {
+      console.error("❌ VTU NETWORK ERROR:", networkErr);
+
+      transaction.status = "failed";
+      transaction.vtuResponse = {
+        error: networkErr.message,
+        raw: rawText,
+      };
+      await transaction.save();
+
+      return res.status(502).json({
+        status: "fail",
+        message: "VTU service unreachable",
+        error: networkErr.message,
+      });
+    }
+
+    console.log("📊 PARSED VTU RESPONSE:", result);
+
+    /** 🔹 VTU RESULT HANDLING */
+    if (result.status === "success" || result.Status === "successful") {
+      console.log("✅ VTU SUCCESS");
+
+      transaction.status = "success";
+      transaction.reference = result.orderid || transaction.reference;
+      transaction.vtuResponse = result;
+      await transaction.save();
+
+      console.log("💸 Deducting wallet balance:", amount);
+
+      const updatedWallet = await Wallet.findOneAndUpdate(
+        { user: userId },
+        { $inc: { balance: -amount, totalSpent: amount } },
+        { new: true }
+      );
+
+      console.log("💰 Wallet after deduction:", updatedWallet);
+
+      return res.status(200).json({
+        status: true,
+        message: "Cable recharge successful",
+        data: {
+          transaction,
+          wallet: {
+            balance: updatedWallet.balance,
+            totalSpent: updatedWallet.totalSpent,
+          },
+          vtu_response: result,
+        },
+      });
+    }
+
+    /** 🔹 VTU FAILURE */
+    console.error("❌ VTU FAILED RESPONSE");
+
+    transaction.status = "failed";
+    transaction.vtuResponse = result;
+    await transaction.save();
+
+    return res.status(400).json({
+      status: "fail",
+      message: result.message || result.Message || "Cable recharge failed",
+      vtu_response: result,
+    });
+  } catch (error) {
+    console.error("🔥 UNHANDLED SERVER ERROR:", error);
+
+    return res.status(500).json({
+      status: "fail",
+      message: error.message || "Internal server error",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  } finally {
+    console.log("================= 🔌 CABLE RECHARGE END =================");
   }
 };
 
@@ -728,4 +1380,6 @@ module.exports = {
   getBalance,
   validateMeter,
   rechargeMeter,
+  validateCable,
+  rechargeCable,
 };
