@@ -40,16 +40,16 @@ const {
   getBalance,
   buyAirtime,
   buyData,
-  getDataPlans,
+  getAllDataPlans,
   rechargeMeter,
   validateMeter,
   validateCable,
   rechargeCable,
 } = require("../controllers/vtuController");
-const protect = require("../middleware/auth");
+const { protect } = require("../middleware/auth");
 
 router.get("/balance", protect, getBalance);
-router.get("/data-plans", getDataPlans);
+router.get("/data-plans", getAllDataPlans);
 router.post("/buy-data", protect, buyData);
 router.post("/buy-airtime", protect, buyAirtime);
 router.post("/validate-meter", protect, validateMeter);
