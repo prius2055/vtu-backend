@@ -11,12 +11,8 @@ const {
 //  * 🔒 ADMIN ONLY ROUTES
 //  * ----------------------------------- */
 
-router.get("/services", protect, restrictTo("admin"), syncDataPlans);
-router.patch(
-  "/services/:id",
-  protect,
-  restrictTo("admin"),
-  updateDataPlanPrice
-);
+router.get("/data", protect, restrictTo("admin"), syncDataPlans);
+
+router.patch("/data/:id", protect, restrictTo("admin"), updateDataPlanPrice);
 
 module.exports = router;

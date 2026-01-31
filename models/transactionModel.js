@@ -2,6 +2,9 @@
 
 // const TransactionSchema = new mongoose.Schema(
 //   {
+//     /* --------------------------------------------------
+//      * USER
+//      * -------------------------------------------------- */
 //     user: {
 //       type: mongoose.Schema.Types.ObjectId,
 //       ref: "User",
@@ -9,6 +12,9 @@
 //       index: true,
 //     },
 
+//     /* --------------------------------------------------
+//      * TRANSACTION TYPE
+//      * -------------------------------------------------- */
 //     type: {
 //       type: String,
 //       enum: [
@@ -17,34 +23,86 @@
 //         "data",
 //         "meter recharge",
 //         "cable recharge",
+//         "referral_bonus",
 //       ],
 //       required: true,
 //     },
 
-//     // Numeric provider network code (1=MTN, 2=AIRTEL, etc.)
+//     /* --------------------------------------------------
+//      * SERVICE PLAN (DATA / AIRTIME / CABLE)
+//      * -------------------------------------------------- */
+//     servicePlan: {
+//       type: mongoose.Schema.Types.ObjectId,
+//       ref: "ServicePlan",
+//     },
+
+//     /* --------------------------------------------------
+//      * NETWORK (VTU PROVIDER CODE)
+//      * 1 = MTN, 2 = AIRTEL, 3 = GLO, 4 = 9MOBILE
+//      * -------------------------------------------------- */
 //     network: {
-//       type: Number,
-//       enum: [1, 2, 3, 4],
+//       type: String,
+//       enum: ["MTN", "AIRTEL", "GLO", "9MOBILE"],
 //       required: function () {
 //         return ["airtime", "data"].includes(this.type);
 //       },
 //     },
 
+//     /* --------------------------------------------------
+//      * PHONE / SMART CARD / METER NUMBER
+//      * -------------------------------------------------- */
 //     phone: {
 //       type: String,
 //       required: function () {
 //         return ["airtime", "data", "meter recharge", "cable recharge"].includes(
-//           this.type
+//           this.type,
 //         );
 //       },
 //     },
 
+//     /* --------------------------------------------------
+//      * AMOUNT CHARGED TO USER
+//      * -------------------------------------------------- */
 //     amount: {
 //       type: Number,
 //       required: true,
 //       min: 0,
 //     },
 
+//     /* --------------------------------------------------
+//      * PRICING BREAKDOWN (VERY IMPORTANT)
+//      * -------------------------------------------------- */
+//     providerPrice: {
+//       type: Number,
+//       default: 0,
+//     },
+
+//     sellingPrice: {
+//       type: Number,
+//       default: 0,
+//     },
+
+//     profit: {
+//       type: Number,
+//       default: 0,
+//     },
+
+//     /* --------------------------------------------------
+//      * METER / CABLE SPECIFIC FIELDS
+//      * -------------------------------------------------- */
+//     disco: String, // e.g. Abuja Electric
+//     meterNumber: String,
+//     meterType: {
+//       type: Number,
+//       enum: [1, 2], // 1 = PREPAID, 2 = POSTPAID
+//     },
+//     meterAddress: String,
+//     customerName: String,
+//     cableName: String,
+
+//     /* --------------------------------------------------
+//      * TRANSACTION REFERENCES
+//      * -------------------------------------------------- */
 //     reference: {
 //       type: String,
 //       unique: true,
@@ -52,21 +110,24 @@
 //       index: true,
 //     },
 
+//     vtuReference: String,
+//     vtuResponse: Object,
+
+//     /* --------------------------------------------------
+//      * STATUS
+//      * -------------------------------------------------- */
 //     status: {
 //       type: String,
 //       enum: ["pending", "success", "failed"],
 //       default: "pending",
+//       index: true,
 //     },
-
-//     // Provider response
-//     vtuReference: String,
-//     vtuResponse: Object,
 
 //     description: String,
 //   },
 //   {
 //     timestamps: true,
-//   }
+//   },
 // );
 
 // module.exports = mongoose.model("Transaction", TransactionSchema);
@@ -97,12 +158,15 @@ const TransactionSchema = new mongoose.Schema(
         "meter recharge",
         "cable recharge",
         "referral_bonus",
+        "upgrade to reseller",
+        "commission",
       ],
       required: true,
+      index: true,
     },
 
     /* --------------------------------------------------
-     * SERVICE PLAN (DATA / AIRTIME / CABLE)
+     * SERVICE / PLAN
      * -------------------------------------------------- */
     servicePlan: {
       type: mongoose.Schema.Types.ObjectId,
@@ -110,31 +174,75 @@ const TransactionSchema = new mongoose.Schema(
     },
 
     /* --------------------------------------------------
-     * NETWORK (VTU PROVIDER CODE)
-     * 1 = MTN, 2 = AIRTEL, 3 = GLO, 4 = 9MOBILE
+     * PROVIDER DETAILS
      * -------------------------------------------------- */
     network: {
-      type: Number,
-      enum: [1, 2, 3, 4],
+      type: String,
+      enum: ["MTN", "AIRTEL", "GLO", "9MOBILE"],
       required: function () {
         return ["airtime", "data"].includes(this.type);
       },
     },
 
+    disco: {
+      type: String,
+      required: function () {
+        return this.type === "meter recharge";
+      },
+    },
+
+    cableName: {
+      type: String,
+      required: function () {
+        return this.type === "cable recharge";
+      },
+    },
+
     /* --------------------------------------------------
-     * PHONE / SMART CARD / METER NUMBER
+     * IDENTIFIERS (CLEAN & EXPLICIT)
      * -------------------------------------------------- */
     phone: {
       type: String,
       required: function () {
         return ["airtime", "data", "meter recharge", "cable recharge"].includes(
-          this.type
+          this.type,
         );
       },
     },
 
+    meterNumber: {
+      type: String,
+      required: function () {
+        return this.type === "meter recharge";
+      },
+    },
+
+    smartCardNumber: {
+      type: String,
+      required: function () {
+        return this.type === "cable recharge";
+      },
+    },
+
     /* --------------------------------------------------
-     * AMOUNT CHARGED TO USER
+     * CUSTOMER DETAILS
+     * -------------------------------------------------- */
+    customerName: String,
+    meterAddress: String,
+
+    /* --------------------------------------------------
+     * METER SPECIFIC
+     * -------------------------------------------------- */
+    meterType: {
+      type: Number,
+      enum: [1, 2], // 1 = PREPAID, 2 = POSTPAID
+      required: function () {
+        return this.type === "meter recharge";
+      },
+    },
+
+    /* --------------------------------------------------
+     * AMOUNTS
      * -------------------------------------------------- */
     amount: {
       type: Number,
@@ -142,48 +250,21 @@ const TransactionSchema = new mongoose.Schema(
       min: 0,
     },
 
-    /* --------------------------------------------------
-     * PRICING BREAKDOWN (VERY IMPORTANT)
-     * -------------------------------------------------- */
-    providerPrice: {
-      type: Number,
-      default: 0,
-    },
-
-    sellingPrice: {
-      type: Number,
-      default: 0,
-    },
-
-    profit: {
-      type: Number,
-      default: 0,
-    },
+    sellingPrice: { type: Number, default: 0 },
+    profit: { type: Number, default: 0 },
 
     /* --------------------------------------------------
-     * METER / CABLE SPECIFIC FIELDS
-     * -------------------------------------------------- */
-    disco: String, // e.g. Abuja Electric
-    meterType: {
-      type: Number,
-      enum: [1, 2], // 1 = PREPAID, 2 = POSTPAID
-    },
-    meterAddress: String,
-    customerName: String,
-    cableName: String,
-
-    /* --------------------------------------------------
-     * TRANSACTION REFERENCES
+     * REFERENCES
      * -------------------------------------------------- */
     reference: {
       type: String,
-      unique: true,
       required: true,
+      unique: true,
       index: true,
     },
 
     vtuReference: String,
-    vtuResponse: Object,
+    vtuResponse: mongoose.Schema.Types.Mixed,
 
     /* --------------------------------------------------
      * STATUS
@@ -197,9 +278,7 @@ const TransactionSchema = new mongoose.Schema(
 
     description: String,
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true },
 );
 
 module.exports = mongoose.model("Transaction", TransactionSchema);

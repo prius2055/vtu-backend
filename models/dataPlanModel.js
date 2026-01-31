@@ -43,6 +43,11 @@ const dataPlanSchema = new mongoose.Schema({
     required: true,
   },
 
+  resellerPrice: {
+    type: Number,
+    required: true,
+  },
+
   validity: String,
 
   isActive: {
@@ -53,6 +58,15 @@ const dataPlanSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now,
+  },
+
+  updatedByAdmin: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+  },
+
+  updatedByAdminAt: {
+    type: Date,
   },
 });
 

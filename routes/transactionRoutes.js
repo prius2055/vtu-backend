@@ -1,15 +1,16 @@
 const express = require("express");
 const router = express.Router();
 const {
-  getTransactions,
+  getAllTransactions,
   getTransaction,
+  getUserTransactions,
 } = require("../controllers/transactionController");
-const { protect } = require("../middleware/auth");
+const { protect, restrictTo } = require("../middleware/auth");
 
-router.use(protect); // Protect all transaction routes
+router.use(protect);
 
-router.route("/").get(getTransactions);
+router.get("/transactions", protect, restrictTo("admin"), getAllTransactions);
 
-router.route("/:id").get(getTransaction);
+router.get("/", protect, getUserTransactions);
 
 module.exports = router;

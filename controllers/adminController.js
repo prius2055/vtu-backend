@@ -6,6 +6,9 @@ const DataPlan = require("../models/dataPlanModel");
 const syncDataPlans = async (req, res) => {
   console.log("🔵 syncServiceDataPlans called");
 
+  CUSTOMER_MARKUP_PERCENT = 10;
+  RESELLER_MARKUP_PERCENT = 5;
+
   try {
     console.log("🟡 Fetching provider API...");
 
@@ -79,9 +82,12 @@ const syncDataPlans = async (req, res) => {
           },
           $setOnInsert: {
             serviceType: "data",
-            sellingPrice: plan.providerPrice, // default
-            // sellingPrice: Math.round(plan.providerPrice * 1.1), // default
-            profit: 0,
+            sellingPrice: Math.ceil(
+              plan.providerPrice * (1 + CUSTOMER_MARKUP_PERCENT / 100),
+            ), // default
+            resellerPrice: Math.ceil(
+              plan.providerPrice * (1 + RESELLER_MARKUP_PERCENT / 100),
+            ),
             isActive: true,
             createdAt: new Date(),
           },
@@ -104,6 +110,7 @@ const syncDataPlans = async (req, res) => {
         modified: bulkResult.modifiedCount,
       },
       data: storedPlans,
+      vtuResult: result,
     });
   } catch (error) {
     console.error("🔥 syncServiceDataPlans ERROR:", error);
@@ -148,6 +155,7 @@ const updateDataPlanPrice = async (req, res) => {
     console.log("🟢 Existing plan:", {
       providerPrice: plan.providerPrice,
       sellingPrice: plan.sellingPrice,
+      resellerPrice: plan.resellerPrice,
       isActive: plan.isActive,
     });
 
@@ -163,7 +171,8 @@ const updateDataPlanPrice = async (req, res) => {
       }
 
       plan.sellingPrice = price;
-      plan.profit = price - plan.providerPrice;
+      plan.resellerPrice = Math.ceil(price * (1 - 2.5 / 100));
+      plan.updatedByAdmin = req.user._id;
       plan.updatedByAdminAt = new Date();
     }
 

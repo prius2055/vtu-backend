@@ -15,9 +15,11 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api/v1", authRoutes);
 app.use("/api/v1/vtu", vtuRoutes);
 app.use("/api/v1/wallet", walletRoutes);
+app.use("/api/v1/admin/services/", transactionRoutes);
 app.use("/api/v1/transactions", transactionRoutes);
 
 app.use("/api/v1/admin", adminRoutes);
+app.use("/api/v1/admin", transactionRoutes);
 
 // app.use("/api/v1/plans", servicePlanRoutes);
 

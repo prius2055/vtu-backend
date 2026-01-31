@@ -38,9 +38,14 @@ const UserSchema = new mongoose.Schema(
 
     role: {
       type: String,
-      enum: ["user", "admin", "agent"],
+      enum: ["user", "reseller", "admin"],
       default: "user",
       index: true,
+    },
+
+    upgradedToResellerAt: {
+      type: Date,
+      default: null,
     },
 
     /* =====================
@@ -69,12 +74,21 @@ const UserSchema = new mongoose.Schema(
       default: 0,
     },
 
+    commissionEarnings: {
+      type: Number,
+      default: 0,
+    },
+
     hasFunded: {
       type: Boolean,
       default: false,
     },
+
+    passwordResetToken: String,
+    passwordResetExpires: Date,
+    passwordChangedAt: Date,
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 module.exports = mongoose.model("User", UserSchema);
