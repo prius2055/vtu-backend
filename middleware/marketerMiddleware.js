@@ -21,6 +21,9 @@ const resolveMarketer = async (req, res, next) => {
       ?.replace(/:\d+$/, "") // ✅ strip :3000, :5000, any port
       ?.toLowerCase()
       ?.trim();
+
+    console.log("🌐 resolveMarketer host:", host); // ✅ add this
+
     const marketerIdHeader = req.headers["x-marketer-id"];
 
     let marketer = null;

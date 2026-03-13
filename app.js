@@ -1,35 +1,5 @@
-// const express = require("express");
-// const cors = require("cors");
-// const authRoutes = require("./routes/authRoutes");
-// const vtuRoutes = require("./routes/vtuRoutes");
-// const walletRoutes = require("./routes/walletRoutes");
-// const transactionRoutes = require("./routes/transactionRoutes");
-// const epinsRoutes = require("./routes/epinsRoutes");
-// const marketerRoutes = require("./routes/marketerRoutes");
-// const { resolveMarketer } = require("./middleware/marketerMiddleware");
-
-// const app = express();
-// app.use(cors());
-// app.use(express.json());
-// app.use(express.urlencoded({ extended: true }));
-
-// app.use(resolveMarketer);
-
-// app.use("/api/v1", authRoutes);
-// app.use("/api/v1/vtu", vtuRoutes);
-// app.use("/api/v1/wallet", walletRoutes);
-// app.use("/api/v1/admin/services/", transactionRoutes);
-// app.use("/api/v1/transactions", transactionRoutes);
-
-// app.use("/api/v1/epins", epinsRoutes);
-
-// app.use("/api/v1/marketer", marketerRoutes);
-
-// module.exports = app;
-
 const express = require("express");
 const cors = require("cors");
-const mongoose = require("mongoose");
 
 const authRoutes = require("./routes/authRoutes");
 const vtuRoutes = require("./routes/vtuRoutes");
@@ -52,11 +22,6 @@ const app = express();
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow all localhost subdomains in dev
-      // Allow all real domains in prod (tighten later)
-      if (!origin || origin.includes("localhost")) {
-        return callback(null, true);
-      }
       callback(null, true);
     },
     credentials: true,
@@ -110,9 +75,11 @@ app.get("/api/v1/health", (req, res) => {
 app.use("/api/v1", authRoutes);
 app.use("/api/v1/vtu", vtuRoutes);
 app.use("/api/v1/wallet", walletRoutes);
-app.use("/api/v1/transactions", transactionRoutes); 
+app.use("/api/v1/transactions", transactionRoutes);
 app.use("/api/v1/epins", epinsRoutes);
 app.use("/api/v1/marketer", marketerRoutes);
+app.use("/api/v1/auth/marketer", marketerRoutes); // ✅ moved above 404
+app.use("/api/v1/admin/marketers", adminMarketerRoutes); // ✅ moved above 404
 
 /* ─────────────────────────────────────────────────────────────
  * 7. 404 HANDLER
@@ -127,7 +94,6 @@ app.use((req, res) => {
 
 /* ─────────────────────────────────────────────────────────────
  * 8. GLOBAL ERROR HANDLER
- *
  * Catches any error passed via next(err) from any route
  * or middleware. Prevents unhandled crashes from leaking
  * stack traces to clients in production.
@@ -135,7 +101,6 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   console.error("🔥 UNHANDLED ERROR:", err);
 
-  // Mongoose validation error
   if (err.name === "ValidationError") {
     const messages = Object.values(err.errors).map((e) => e.message);
     return res.status(400).json({
@@ -145,7 +110,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Mongoose duplicate key error
   if (err.code === 11000) {
     const field = Object.keys(err.keyValue || {})[0] || "field";
     return res.status(400).json({
@@ -154,7 +118,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Mongoose bad ObjectId
   if (err.name === "CastError") {
     return res.status(400).json({
       status: "fail",
@@ -162,7 +125,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // JWT errors
   if (err.name === "JsonWebTokenError") {
     return res.status(401).json({
       status: "fail",
@@ -177,7 +139,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Default — hide internal details in production
   const statusCode = err.statusCode || 500;
   res.status(statusCode).json({
     status: "error",
@@ -188,8 +149,5 @@ app.use((err, req, res, next) => {
     ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
   });
 });
-
-app.use("/api/v1/auth/marketer", marketerRoutes); // public signup
-app.use("/api/v1/admin/marketers", adminMarketerRoutes); // superadmin management
 
 module.exports = app;
