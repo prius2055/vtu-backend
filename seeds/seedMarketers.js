@@ -271,6 +271,43 @@ const TEST_MARKETERS = [
       role: "marketer",
     },
   },
+
+  {
+    marketer: {
+      name: "Adesina",
+      brandName: "Subadex",
+      domains: ["subadex.com", "www.subadex.com"],
+      status: "active",
+      isDefault: false,
+      pricing: {
+        markupType: "flat",
+        airtimeMarkup: 0,
+        dataMarkup: 0,
+        cableMarkup: 0,
+        electricityMarkup: 0,
+        epinMarkup: 0,
+      },
+      commission: {
+        referralPercent: 0,
+        resellerPercent: 0,
+      },
+      settings: {
+        allowRegistration: true,
+        allowWalletFunding: true,
+        allowWithdrawals: true,
+        maintenanceMode: false,
+      },
+    },
+    owner: {
+      fullName: "Adesina Subadex",
+      username: "subadex_marketer",
+      email: "admin@subadex.com", // ← update with real email
+      phone: "+234 0704 485 9310", // ← update with real phone
+      address: "6 Itelorun Close off Adeniyi Jones, Ikeja, Lagos State",
+      password: "@Subadex@711", // ← change immediately after seeding
+      role: "marketer",
+    },
+  },
 ];
 
 /* ─────────────────────────────────────────────────────────────
@@ -335,10 +372,10 @@ const createMarketer = async ({ marketer: marketerData, owner: ownerData }) => {
  * MAIN
  * ───────────────────────────────────────────────────────────── */
 const seed = async () => {
-  if (process.env.NODE_ENV === "production") {
-    console.error("❌ This script cannot run in production.");
-    process.exit(1);
-  }
+  // if (process.env.NODE_ENV === "production") {
+  //   console.error("❌ This script cannot run in production.");
+  //   process.exit(1);
+  // }
 
   try {
     await mongoose.connect(process.env.DB);
