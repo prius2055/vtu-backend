@@ -8,11 +8,12 @@ const {
   requestPasswordReset,
   resetPassword,
 } = require("../controllers/authController");
-const { protect } = require("../middleware/auth");
+const { protect } = require("../middleware/authMiddleware");
+const { resolveMarketer } = require("../middleware/marketerMiddleware");
 
-router.route("/register").post(register);
+router.route("/register").post(resolveMarketer, register);
 
-router.route("/login").post(login);
+router.route("/login").post(resolveMarketer, login);
 
 router.route("/me").get(protect, getMe);
 

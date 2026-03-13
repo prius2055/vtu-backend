@@ -1,18 +1,23 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
+const sgMail = require("@sendgrid/mail");
 
 const User = require("../models/userModel");
+const Marketer = require("../models/marketerModel");
 const Wallet = require("../models/walletModel");
-const generateReferralCode = require("../utils/utils.js");
-const sgMail = require("@sendgrid/mail");
+const { generateReferralCode } = require("../utils/utils.js");
+
+/* ─────────────────────────────────────────────────────────────
+ * HELPERS
+ * ───────────────────────────────────────────────────────────── */
 
 const signToken = (user) => {
   return jwt.sign(
     {
       id: user._id,
-      role: user.role, // ✅ embed role
+      role: user.role,
+      marketerId: user.marketerId, // ✅ embed marketer context in token
     },
     process.env.JWT_SECRET,
     {
@@ -21,10 +26,14 @@ const signToken = (user) => {
   );
 };
 
-const createSendToken = (user, statusCode, res) => {
+const createSendToken = async (user, statusCode, res) => {
   const token = signToken(user);
 
-  user.password = undefined;
+  // Populate marketer details for the response
+  const populatedUser = await User.findById(user._id).populate({
+    path: "marketerId",
+    select: "name brandName logo domains wallet.balance status",
+  });
 
   res.status(statusCode).json({
     status: "success",
@@ -34,9 +43,12 @@ const createSendToken = (user, statusCode, res) => {
       fullName: user.fullName,
       email: user.email,
       username: user.username,
+      phone: user.phone,
       role: user.role,
-
-      // 🔁 Referral and commission(read-only)
+      status: user.status,
+      marketerId: user.marketerId,
+      marketer: populatedUser.marketerId || null,
+      walletBalance: user.walletBalance,
       referralCode: user.referralCode,
       referralsCount: user.referralsCount,
       referralEarnings: user.referralEarnings,
@@ -46,104 +58,144 @@ const createSendToken = (user, statusCode, res) => {
   });
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * REGISTER
+ * ───────────────────────────────────────────────────────────── */
 const register = async (req, res) => {
+  console.log("\n================ REGISTER START ================");
+
   try {
-    console.log("🔵 REGISTER REQUEST RECEIVED");
-    console.log("📥 Raw Request Body:", req.body);
+    /* =============================
+       1. MARKETER CHECK
+       (replaces store check)
+    ============================= */
+    if (!req.marketer) {
+      console.log("❌ Marketer resolution failed");
+      return res.status(500).json({
+        status: "fail",
+        message: "No platform found for this domain.",
+      });
+    }
 
-    const {
-      fullName,
-      username,
-      email,
-      phone,
-      address,
-      password,
-      referrer, // referralCode
-    } = req.body;
-
-    console.log("🧾 Parsed Fields:", {
-      fullName,
-      username,
-      email,
-      phone,
-      address,
-      referrer,
-      passwordProvided: !!password,
+    console.log("🏪 Marketer resolved:", {
+      id: req.marketer._id,
+      name: req.marketer.name,
     });
 
-    // 1️⃣ Validate required fields
-    if (!email || !password || !username) {
-      console.log("❌ Validation failed: missing required fields");
-      return res.status(400).json({
+    // checkRegistrationOpen middleware handles this, but double-check here
+    if (!req.marketer.settings.allowRegistration) {
+      console.log("⛔ Registration disabled for this platform");
+      return res.status(403).json({
         status: "fail",
-        message: "Email, username and password are required",
+        message: "Registration is currently closed on this platform.",
       });
     }
 
-    // 2️⃣ Check if user exists
-    console.log("🔍 Checking existing user for email:", email);
-    const existingUser = await User.findOne({ email });
+    /* =============================
+       2. INPUT VALIDATION
+    ============================= */
+    const { fullName, username, email, phone, address, password, referrer } =
+      req.body;
+
+    console.log("🧾 Validating fields...");
+
+    if (!fullName || !email || !password || !username || !phone || !address) {
+      return res.status(400).json({
+        status: "fail",
+        message:
+          "fullName, email, username, phone, address and password are required.",
+      });
+    }
+
+    /* =============================
+       3. DUPLICATE CHECK
+       ✅ Scoped to marketerId —
+       same email/username/phone
+       can exist on other platforms
+    ============================= */
+    console.log("🔍 Checking for existing user (scoped to marketer)...");
+
+    const existingUser = await User.findOne({
+      marketerId: req.marketer._id,
+      $or: [{ email }, { username }, { phone }],
+    });
 
     if (existingUser) {
-      console.log("⚠️ User already exists:", existingUser._id);
+      let field = "details";
+      if (existingUser.email === email) field = "email";
+      else if (existingUser.username === username) field = "username";
+      else if (existingUser.phone === phone) field = "phone number";
+
+      console.log(`⚠️ Duplicate ${field} found`);
       return res.status(400).json({
         status: "fail",
-        message: "User already exists",
+        message: `A user with this ${field} already exists on this platform.`,
       });
     }
 
-    console.log("✅ No existing user found");
+    console.log("✅ No duplicate found");
 
-    // 3️⃣ Hash password
+    /* =============================
+       4. PASSWORD HASH
+    ============================= */
     console.log("🔐 Hashing password...");
     const hashedPassword = await bcrypt.hash(password, 12);
-    console.log("✅ Password hashed");
 
-    // 4️⃣ Generate unique referral code
-    console.log("🔁 Generating referral code...");
+    /* =============================
+       5. REFERRAL CODE GENERATION
+    ============================= */
+    console.log("🎟 Generating unique referral code...");
     let referralCode;
     let attempts = 0;
 
     while (true) {
       referralCode = generateReferralCode();
       attempts++;
-
       const exists = await User.findOne({ referralCode });
       if (!exists) break;
-
-      console.log(
-        `⚠️ Referral code collision detected, retrying (${attempts})`,
-      );
+      console.log(`⚠️ Referral code collision, retrying (${attempts})`);
     }
 
-    console.log("🎟️ Referral code generated:", referralCode);
+    console.log("✅ Referral code generated:", referralCode);
 
-    // 5️⃣ Handle referrer
+    /* =============================
+       6. REFERRER LOOKUP
+       ✅ Scoped to same marketer —
+       can't refer across platforms
+    ============================= */
     let referredBy = null;
 
     if (referrer) {
-      console.log("🔗 Referral code supplied:", referrer);
-      const referrerUser = await User.findOne({ referralCode: referrer });
+      console.log("🔗 Looking up referrer:", referrer);
+
+      const referrerUser = await User.findOne({
+        referralCode: referrer,
+        marketerId: req.marketer._id, // ✅ scoped
+      });
 
       if (!referrerUser) {
-        console.log("❌ Invalid referral code:", referrer);
+        console.log("❌ Invalid referral code");
         return res.status(400).json({
           status: "fail",
-          message: "Invalid referral code",
+          message: "Invalid referral code.",
         });
       }
 
       referredBy = referrerUser._id;
-      console.log("✅ Referrer found:", {
-        id: referrerUser._id,
-        username: referrerUser.username,
+      console.log("✅ Referrer found:", referredBy);
+
+      await User.findByIdAndUpdate(referredBy, {
+        $inc: { referralsCount: 1 },
       });
-    } else {
-      console.log("ℹ️ No referral code provided");
+
+      console.log("📈 Referrer count incremented");
     }
 
-    // 6️⃣ Create user
-    console.log("🧑 Creating new user...");
+    /* =============================
+       7. CREATE USER
+    ============================= */
+    console.log("👤 Creating user...");
+
     const user = await User.create({
       fullName,
       username,
@@ -154,130 +206,170 @@ const register = async (req, res) => {
       referralCode,
       referredBy,
       role: "user",
+      marketerId: req.marketer._id, // ✅ replaces store
     });
 
-    console.log("✅ User created:", {
-      id: user._id,
-      email: user.email,
-      referralCode: user.referralCode,
-      referredBy: user.referredBy,
+    console.log("✅ User created:", user._id);
+
+    /* =============================
+       8. UPDATE MARKETER STATS
+       (replaces Store stats update)
+    ============================= */
+    console.log("📊 Updating marketer stats...");
+
+    await Marketer.findByIdAndUpdate(req.marketer._id, {
+      $inc: { "stats.totalUsers": 1 },
     });
 
-    // 7️⃣ Increment referrer count
-    if (referredBy) {
-      console.log("📈 Incrementing referrer count for:", referredBy);
-      await User.findByIdAndUpdate(referredBy, {
-        $inc: { referralsCount: 1 },
-      });
-      console.log("✅ Referrer count updated");
-    }
+    console.log("✅ Marketer stats updated");
 
-    // 8️⃣ Create wallet
-    console.log("💰 Creating wallet for user:", user._id);
+    /* =============================
+       9. CREATE WALLET
+    ============================= */
+    console.log("💰 Creating wallet...");
+
     const wallet = await Wallet.create({
       user: user._id,
+      marketerId: req.marketer._id, // ✅ wallet also scoped to marketer
       balance: 0,
     });
+
     console.log("✅ Wallet created:", wallet._id);
 
-    // 9️⃣ Send auth token
-    console.log("🔑 Sending auth token");
+    /* =============================
+       10. SUCCESS
+    ============================= */
+    console.log("🎉 Registration successful");
+    console.log("=============== REGISTER END ===============\n");
+
     createSendToken(user, 201, res);
-  } catch (error) {
-    console.error("🔥 REGISTER ERROR OCCURRED");
-    console.error("Message:", error.message);
-    console.error("Stack:", error.stack);
+  } catch (err) {
+    console.error("\n🔥 REGISTER ERROR:", err.message);
+    console.error("Stack:", err.stack);
 
     res.status(500).json({
       status: "error",
-      message: "Registration failed",
+      message: "Registration failed. Please try again.",
     });
   }
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * LOGIN
+ * ───────────────────────────────────────────────────────────── */
 const login = async (req, res) => {
-  try {
-    console.log("🔐 Login attempt received");
+  console.log("\n================ LOGIN START ================");
 
+  try {
+    /* =============================
+       1. MARKETER CHECK
+    ============================= */
+    if (!req.marketer) {
+      console.log("❌ Marketer resolution failed");
+      return res.status(500).json({
+        status: "fail",
+        message: "No platform found for this domain.",
+      });
+    }
+
+    console.log("🏪 Marketer:", {
+      id: req.marketer._id,
+      name: req.marketer.name,
+    });
+
+    /* =============================
+       2. INPUT
+    ============================= */
     let { username, password } = req.body;
 
-    console.log("📩 Request body:", {
-      username,
-      passwordProvided: !!password,
-    });
-
-    // 1️⃣ Validate input
     if (!username || !password) {
-      console.log("❌ Missing username or password");
       return res.status(400).json({
         status: "fail",
-        message: "Please provide username and password",
+        message: "Username and password are required.",
       });
     }
 
-    // Normalize username
     username = username.toLowerCase().trim();
 
-    // Find user
-    console.log("🔍 Searching for user with username:", username);
-    const user = await User.findOne({ username }).select("+password");
+    /* =============================
+       3. FIND USER
+       ✅ Scoped to marketerId —
+       same username on two platforms
+       are treated as different users
+    ============================= */
+    const user = await User.findOne({
+      username,
+      marketerId: req.marketer._id, // ✅ replaces store
+    }).select("+password");
 
     if (!user) {
-      console.log("❌ No user found with this username");
+      console.log("❌ User not found on this platform");
       return res.status(401).json({
         status: "fail",
-        message: "Incorrect username or password",
+        message: "Incorrect username or password.",
       });
     }
 
-    console.log("📦 Raw user object:", user);
+    console.log("✅ User found:", { id: user._id, role: user.role });
 
-    console.log("✅ User found:", {
-      id: user._id,
-      username: user.username,
-      role: user.role,
-    });
+    /* =============================
+       4. PASSWORD CHECK
+    ============================= */
+    const valid = await bcrypt.compare(password, user.password);
 
-    // 3️⃣ Compare password
-    console.log("🔐 Comparing passwords...");
-    const isPasswordCorrect = await bcrypt.compare(password, user.password);
-
-    if (!isPasswordCorrect) {
+    if (!valid) {
       console.log("❌ Password mismatch");
       return res.status(401).json({
         status: "fail",
-        message: "Incorrect username or password",
+        message: "Incorrect username or password.",
       });
     }
 
-    console.log("✅ Password match successful");
+    /* =============================
+       5. ACCOUNT STATUS
+    ============================= */
+    if (user.status === "suspended") {
+      return res.status(403).json({
+        status: "fail",
+        message: "Your account has been suspended. Contact support.",
+      });
+    }
 
-    // 4️⃣ Send token
-    console.log("🎟️ Generating JWT and sending response");
+    /* =============================
+       6. SUCCESS
+    ============================= */
+    console.log("🎉 Login successful");
+    console.log("=============== LOGIN END ===============\n");
+
     createSendToken(user, 200, res);
-  } catch (error) {
-    console.error("🔥 Login error:", error);
+  } catch (err) {
+    console.error("🔥 LOGIN ERROR:", err.message);
 
     res.status(500).json({
       status: "error",
-      message: "Internal server error",
-      error: error.message, // helpful for frontend debugging
+      message: "Login failed. Please try again.",
     });
   }
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * GET ME
+ * ───────────────────────────────────────────────────────────── */
 const getMe = async (req, res) => {
   try {
-    console.log("👤 getMe called by:", req.user);
+    console.log("👤 getMe called by:", req.user._id);
 
-    const user = await User.findById(req.user.id).select(
-      "fullName email phone role username createdAt",
-    );
+    const user = await User.findById(req.user._id)
+      .select("-password -__v -passwordResetToken -passwordResetExpires")
+      .populate({
+        path: "marketerId",
+        select: "name brandName logo status",
+      });
 
     if (!user) {
       return res.status(404).json({
         status: "fail",
-        message: "User not found",
+        message: "User not found.",
       });
     }
 
@@ -288,8 +380,17 @@ const getMe = async (req, res) => {
         fullName: user.fullName,
         email: user.email,
         phone: user.phone,
-        role: user.role, // ✅ explicit
-        userMame: user.username,
+        username: user.username,
+        address: user.address,
+        role: user.role,
+        status: user.status,
+        walletBalance: user.walletBalance,
+        marketerId: user.marketerId?._id,
+        marketer: user.marketerId || null,
+        referralCode: user.referralCode,
+        referralsCount: user.referralsCount,
+        referralEarnings: user.referralEarnings,
+        commissionEarnings: user.commissionEarnings,
         createdAt: user.createdAt,
       },
     });
@@ -298,12 +399,14 @@ const getMe = async (req, res) => {
 
     res.status(500).json({
       status: "fail",
-      message: error.message || "Failed to fetch user profile",
+      message: error.message || "Failed to fetch user profile.",
     });
   }
 };
 
-// Verify token endpoint
+/* ─────────────────────────────────────────────────────────────
+ * VERIFY TOKEN
+ * ───────────────────────────────────────────────────────────── */
 const verify = async (req, res) => {
   try {
     res.status(200).json({
@@ -319,115 +422,95 @@ const verify = async (req, res) => {
   }
 };
 
-/* ----------------------------------
+/* ─────────────────────────────────────────────────────────────
  * REQUEST PASSWORD RESET
- * --------------------------------- */
+ * ───────────────────────────────────────────────────────────── */
 const requestPasswordReset = async (req, res) => {
   try {
     console.log("🔵 Password reset request received");
 
     const { email } = req.body;
 
-    console.log("📧 Email provided:", email);
-
-    // 1️⃣ Validate email
     if (!email) {
-      console.log("❌ No email provided");
       return res.status(400).json({
         status: "fail",
-        message: "Please provide your email address",
+        message: "Please provide your email address.",
       });
     }
 
-    // 2️⃣ Find user
-    console.log("🔍 Looking for user with email:", email);
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    // ✅ Scope lookup to marketer so users on different platforms
+    // don't accidentally reset each other's passwords
+    const user = await User.findOne({
+      email: email.toLowerCase().trim(),
+      marketerId: req.marketer?._id || null,
+    }).select("+passwordResetToken +passwordResetExpires");
 
-    // Always send success response (security best practice - don't reveal if email exists)
+    // Always return success (don't reveal if email exists)
     if (!user) {
-      console.log("⚠️ User not found, but sending success response");
+      console.log("⚠️ User not found — sending generic success response");
       return res.status(200).json({
         status: "success",
-        message:
-          "If your email is registered, you will receive a password reset link",
+        message: "If your email is registered, you will receive a reset link.",
       });
     }
 
     console.log("✅ User found:", user._id);
 
-    // 3️⃣ Generate reset token
-    console.log("🔑 Generating reset token...");
+    // Generate and hash reset token
     const resetToken = crypto.randomBytes(32).toString("hex");
-
-    // Hash token before storing (security best practice)
     const hashedToken = crypto
       .createHash("sha256")
       .update(resetToken)
       .digest("hex");
 
-    console.log("✅ Reset token generated");
-
-    // 4️⃣ Save hashed token and expiry to user
     user.passwordResetToken = hashedToken;
     user.passwordResetExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
     await user.save({ validateBeforeSave: false });
 
-    console.log("💾 Reset token saved to user");
+    console.log("💾 Reset token saved");
 
-    // 5️⃣ Create reset URL
-    const resetURL = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    // Build reset URL using marketer's domain if available
+    const baseUrl = req.marketer?.domains?.[0]
+      ? `https://${req.marketer.domains[0]}`
+      : process.env.FRONTEND_URL;
 
-    console.log("🔗 Reset URL created");
+    const resetURL = `${baseUrl}/reset-password/${resetToken}`;
 
-    // 6️⃣ Send email
-    // try {
-    //   console.log("📨 Sending reset email...");
-    //   await sendPasswordResetEmail(user.email, user.fullName, resetURL);
-    //   console.log("✅ Email sent successfully");
+    console.log("🔗 Reset URL:", resetURL);
 
-    //   res.status(200).json({
-    //     status: "success",
-    //     message: "Password reset link sent to your email",
-    //   });
-    // } catch (emailError) {
-    //   console.error("❌ Email sending failed:", emailError);
+    // Send via SendGrid
+    try {
+      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-    //   // Clear reset token if email fails
-    //   user.passwordResetToken = undefined;
-    //   user.passwordResetExpires = undefined;
-    //   await user.save({ validateBeforeSave: false });
-
-    //   return res.status(500).json({
-    //     status: "error",
-    //     message: "Failed to send reset email. Please try again later.",
-    //   });
-    // }
-
-    // ////////////////////////////////////////
-
-    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-    // sgMail.setDataResidency('eu');
-    // uncomment the above line if you are sending mail using a regional EU subuser
-
-    const msg = {
-      to: `${user.email}`, // Change to your recipient
-      from: "info@vtvend.com", // Change to your verified sender
-      subject: "Email reset url",
-      text: "and easy to do anywhere, even with Node.js",
-      html: `<strong>${resetURL}</strong>`,
-    };
-    sgMail
-      .send(msg)
-      .then(() => {
-        console.log("Email sent");
-      })
-      .catch((error) => {
-        console.error(error);
+      await sgMail.send({
+        to: user.email,
+        from: process.env.SENDGRID_FROM_EMAIL || "info@vtvend.com",
+        subject: "Password Reset Request",
+        html: passwordResetEmailTemplate(user.fullName, resetURL),
       });
 
-    ////////////////////////////////////////////////
+      console.log("✅ Reset email sent to:", user.email);
+    } catch (emailError) {
+      console.error("❌ SendGrid error:", emailError.message);
+
+      // Clear token if email fails so user can retry
+      user.passwordResetToken = undefined;
+      user.passwordResetExpires = undefined;
+      await user.save({ validateBeforeSave: false });
+
+      return res.status(500).json({
+        status: "error",
+        message: "Failed to send reset email. Please try again later.",
+      });
+    }
+
+    // ✅ This was missing in your original — response was never sent after sgMail
+    res.status(200).json({
+      status: "success",
+      message: "Password reset link sent to your email.",
+    });
   } catch (error) {
-    console.error("🔥 requestPasswordReset error:", error);
+    console.error("🔥 requestPasswordReset error:", error.message);
 
     res.status(500).json({
       status: "error",
@@ -436,9 +519,9 @@ const requestPasswordReset = async (req, res) => {
   }
 };
 
-/* ----------------------------------
+/* ─────────────────────────────────────────────────────────────
  * RESET PASSWORD
- * --------------------------------- */
+ * ───────────────────────────────────────────────────────────── */
 const resetPassword = async (req, res) => {
   try {
     console.log("🔵 Password reset attempt");
@@ -446,81 +529,71 @@ const resetPassword = async (req, res) => {
     const { token } = req.params;
     const { password, confirmPassword } = req.body;
 
-    console.log("🔑 Token received:", token ? "Yes" : "No");
-    console.log("🔐 Password provided:", !!password);
-
-    // 1️⃣ Validate input
     if (!password || !confirmPassword) {
-      console.log("❌ Missing password fields");
       return res.status(400).json({
         status: "fail",
-        message: "Please provide password and confirm password",
+        message: "Please provide password and confirm password.",
       });
     }
 
     if (password !== confirmPassword) {
-      console.log("❌ Passwords don't match");
       return res.status(400).json({
         status: "fail",
-        message: "Passwords do not match",
+        message: "Passwords do not match.",
       });
     }
 
     if (password.length < 8) {
-      console.log("❌ Password too short");
       return res.status(400).json({
         status: "fail",
-        message: "Password must be at least 8 characters long",
+        message: "Password must be at least 8 characters.",
       });
     }
 
-    // 2️⃣ Hash the token from URL
-    console.log("🔍 Hashing token for lookup...");
+    // Hash incoming token to compare with stored hash
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
-    // 3️⃣ Find user with valid token
-    console.log("🔍 Finding user with token...");
     const user = await User.findOne({
       passwordResetToken: hashedToken,
-      passwordResetExpires: { $gt: Date.now() }, // Token not expired
-    });
+      passwordResetExpires: { $gt: Date.now() },
+    }).select("+passwordResetToken +passwordResetExpires");
 
     if (!user) {
-      console.log("❌ Invalid or expired token");
       return res.status(400).json({
         status: "fail",
-        message: "Invalid or expired reset token",
+        message: "Invalid or expired reset token.",
       });
     }
 
-    console.log("✅ Valid token found for user:", user._id);
+    console.log("✅ Valid token for user:", user._id);
 
-    // 4️⃣ Hash new password
-    console.log("🔐 Hashing new password...");
-    const hashedPassword = await bcrypt.hash(password, 12);
-
-    // 5️⃣ Update password and clear reset token
-    user.password = hashedPassword;
+    // Update password
+    user.password = await bcrypt.hash(password, 12);
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
     user.passwordChangedAt = Date.now();
     await user.save();
 
-    console.log("✅ Password updated successfully");
+    console.log("✅ Password updated");
 
-    // 6️⃣ Send confirmation email (optional)
+    // Send confirmation email (non-blocking)
     try {
-      await sendPasswordChangedEmail(user.email, user.fullName);
+      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+      await sgMail.send({
+        to: user.email,
+        from: process.env.SENDGRID_FROM_EMAIL || "info@vtvend.com",
+        subject: "Password Changed Successfully",
+        html: passwordChangedEmailTemplate(user.fullName),
+      });
     } catch (emailError) {
-      console.warn("⚠️ Failed to send confirmation email:", emailError);
-      // Don't fail the request if email fails
+      console.warn("⚠️ Failed to send confirmation email:", emailError.message);
+      // Don't fail the request if confirmation email fails
     }
 
-    // 7️⃣ Log user in with new password
-    console.log("🎟️ Generating JWT and logging user in");
+    // Log user in with new token
     createSendToken(user, 200, res);
   } catch (error) {
-    console.error("🔥 resetPassword error:", error);
+    console.error("🔥 resetPassword error:", error.message);
 
     res.status(500).json({
       status: "error",
@@ -529,128 +602,72 @@ const resetPassword = async (req, res) => {
   }
 };
 
-/* ----------------------------------
- * EMAIL SENDING FUNCTIONS
- * --------------------------------- */
-const sendPasswordResetEmail = async (email, fullName, resetURL) => {
-  // Create transporter
-  const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST, // e.g., smtp.gmail.com
-    port: process.env.EMAIL_PORT, // 587 for TLS
-    secure: false, // true for 465, false for other ports
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASSWORD,
-    },
-  });
-
-  // Email content
-  const mailOptions = {
-    from: `"${process.env.APP_NAME || "VTU App"}" <${process.env.EMAIL_USER}>`,
-    to: email,
-    subject: "Password Reset Request",
-    html: `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background-color: #2563eb; color: white; padding: 20px; text-align: center; }
-            .content { background-color: #f9fafb; padding: 30px; }
-            .button { 
-              display: inline-block; 
-              padding: 12px 30px; 
-              background-color: #2563eb; 
-              color: white; 
-              text-decoration: none; 
-              border-radius: 5px; 
-              margin: 20px 0;
-            }
-            .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 12px; }
-            .warning { color: #dc2626; font-weight: bold; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>Password Reset Request</h1>
-            </div>
-            <div class="content">
-              <p>Hi ${fullName || "there"},</p>
-              
-              <p>You recently requested to reset your password. Click the button below to reset it:</p>
-              
-              <div style="text-align: center;">
-                <a href="${resetURL}" class="button">Reset Password</a>
-              </div>
-              
-              <p>Or copy and paste this link into your browser:</p>
-              <p style="background-color: #e5e7eb; padding: 10px; word-break: break-all;">
-                ${resetURL}
-              </p>
-              
-              <p class="warning">⚠️ This link will expire in 10 minutes.</p>
-              
-              <p>If you didn't request a password reset, please ignore this email or contact support if you have concerns.</p>
-              
-              <p>Thanks,<br>The ${process.env.APP_NAME || "VTU"} Team</p>
-            </div>
-            <div class="footer">
-              <p>This is an automated email. Please do not reply.</p>
-            </div>
+/* ─────────────────────────────────────────────────────────────
+ * EMAIL TEMPLATES
+ * Consolidated — all email goes through SendGrid
+ * ───────────────────────────────────────────────────────────── */
+const passwordResetEmailTemplate = (fullName, resetURL) => `
+  <!DOCTYPE html>
+  <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background-color: #2563eb; color: white; padding: 20px; text-align: center; }
+        .content { background-color: #f9fafb; padding: 30px; }
+        .button {
+          display: inline-block;
+          padding: 12px 30px;
+          background-color: #2563eb;
+          color: white;
+          text-decoration: none;
+          border-radius: 5px;
+          margin: 20px 0;
+        }
+        .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 12px; }
+        .warning { color: #dc2626; font-weight: bold; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header"><h1>Password Reset Request</h1></div>
+        <div class="content">
+          <p>Hi ${fullName || "there"},</p>
+          <p>You requested to reset your password. Click the button below:</p>
+          <div style="text-align: center;">
+            <a href="${resetURL}" class="button">Reset Password</a>
           </div>
-        </body>
-      </html>
-    `,
-  };
+          <p>Or copy this link into your browser:</p>
+          <p style="background-color: #e5e7eb; padding: 10px; word-break: break-all;">${resetURL}</p>
+          <p class="warning">⚠️ This link expires in 10 minutes.</p>
+          <p>If you didn't request this, ignore this email.</p>
+          <p>Thanks,<br>The ${process.env.APP_NAME || "VTU"} Team</p>
+        </div>
+        <div class="footer"><p>This is an automated email. Please do not reply.</p></div>
+      </div>
+    </body>
+  </html>
+`;
 
-  // Send email
-  await transporter.sendMail(mailOptions);
-};
+const passwordChangedEmailTemplate = (fullName) => `
+  <!DOCTYPE html>
+  <html>
+    <body>
+      <div style="max-width:600px;margin:0 auto;padding:20px;font-family:Arial,sans-serif;">
+        <div style="background-color:#10b981;color:white;padding:20px;text-align:center;">
+          <h1>Password Changed ✓</h1>
+        </div>
+        <div style="background-color:#f9fafb;padding:30px;">
+          <p>Hi ${fullName || "there"},</p>
+          <p>Your password has been changed successfully.</p>
+          <p>If you didn't make this change, contact our support team immediately.</p>
+          <p>Thanks,<br>The ${process.env.APP_NAME || "VTU"} Team</p>
+        </div>
+      </div>
+    </body>
+  </html>
+`;
 
-const sendPasswordChangedEmail = async (email, fullName) => {
-  const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT,
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASSWORD,
-    },
-  });
-
-  const mailOptions = {
-    from: `"${process.env.APP_NAME || "VTU App"}" <${process.env.EMAIL_USER}>`,
-    to: email,
-    subject: "Password Changed Successfully",
-    html: `
-      <!DOCTYPE html>
-      <html>
-        <body>
-          <div style="max-width: 600px; margin: 0 auto; padding: 20px; font-family: Arial, sans-serif;">
-            <div style="background-color: #10b981; color: white; padding: 20px; text-align: center;">
-              <h1>Password Changed ✓</h1>
-            </div>
-            <div style="background-color: #f9fafb; padding: 30px;">
-              <p>Hi ${fullName || "there"},</p>
-              
-              <p>Your password has been changed successfully.</p>
-              
-              <p>If you didn't make this change, please contact our support team immediately.</p>
-              
-              <p>Thanks,<br>The ${process.env.APP_NAME || "VTU"} Team</p>
-            </div>
-          </div>
-        </body>
-      </html>
-    `,
-  };
-
-  await transporter.sendMail(mailOptions);
-};
-
-// Export the new functions
 module.exports = {
   register,
   login,

@@ -1,7 +1,9 @@
 const Transaction = require("../models/transactionModel");
 const Wallet = require("../models/walletModel");
 const DataPlan = require("../models/dataPlanModel");
-const applyDataCommission = require("../services/commissionService");
+const Marketer = require("../models/marketerModel");
+const MarketerPricing = require("../models/marketerPriceModel");
+const { applyDataCommission } = require("../services/commissionService");
 
 const NETWORK_MAP = {
   MTN: 1,
@@ -21,569 +23,835 @@ const extractGB = (planName = "") => {
   return Math.floor(Number(match[1]));
 };
 
-const getAllDataPlans = async (req, res) => {
+/* ─────────────────────────────────────────────────────────────
+ * SHARED HELPERS
+ * Eliminates repeated boilerplate across every handler
+ * ───────────────────────────────────────────────────────────── */
+
+/**
+ * Generate a unique transaction reference + requestId pair
+ */
+const generateRefs = (prefix, userId) => {
+  const ts = Date.now();
+  const suffix = userId.toString().slice(-6).toUpperCase();
+  return {
+    reference: `${prefix}_${ts}_${suffix}`,
+    requestId: `REQID_${prefix}_${ts}_${suffix}`,
+  };
+};
+
+/**
+ * Fetch and validate the user's wallet (scoped to marketer).
+ * Returns the wallet or throws with a formatted API response.
+ */
+const getValidWallet = async (userId, marketerId, amountNeeded, res) => {
+  const wallet = await Wallet.findOne({ user: userId, marketerId });
+
+  if (!wallet) {
+    res.status(404).json({ status: "fail", message: "Wallet not found." });
+    return null;
+  }
+
+  if (wallet.balance < amountNeeded) {
+    res.status(400).json({
+      status: "fail",
+      message: `Insufficient balance. Available ₦${wallet.balance.toLocaleString()}, Required ₦${amountNeeded.toLocaleString()}`,
+      available: wallet.balance,
+      required: amountNeeded,
+    });
+    return null;
+  }
+
+  return wallet;
+};
+
+/**
+ * Call the VTU provider and return parsed result.
+ * Throws on network/parse errors.
+ */
+const callVtuProvider = async (url, payload, method = "POST") => {
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Token ${process.env.API_TOKEN}`,
+    },
+    body: method !== "GET" ? JSON.stringify(payload) : undefined,
+  });
+
+  const rawText = await response.text();
+  console.log("📄 VTU RAW RESPONSE:", rawText);
+
+  if (!rawText || rawText.trim() === "") {
+    throw new Error("Empty response from VTU provider.");
+  }
+
   try {
-    console.log("📦 Fetching data plans from DB");
+    return JSON.parse(rawText);
+  } catch {
+    throw new Error("VTU returned a non-JSON response.");
+  }
+};
 
-    const plans = await DataPlan.find({
-      serviceType: "data",
-      isActive: true,
-    })
-      .sort({ network: 1, sellingPrice: 1 })
-      .lean();
+/**
+ * Check if a VTU result object indicates success.
+ */
+const isVtuSuccess = (result) =>
+  result?.status === "success" ||
+  result?.Status === "successful" ||
+  result?.success === true;
 
-    console.log("✅ Plans fetched:", plans.length);
+/**
+ * Atomically deduct wallet and update marketer stats after VTU success.
+ */
+const finalizeTransaction = async ({
+  transaction,
+  userId,
+  marketerId,
+  amountToCharge,
+  marketerProfit,
+  vtuResult,
+}) => {
+  // ── Mark transaction success ──
+  transaction.status = "success";
+  transaction.vtuReference = vtuResult.orderid || vtuResult.api_response;
+  transaction.vtuResponse = vtuResult;
+  await transaction.save();
 
-    res.status(200).json({
+  // ── Deduct user wallet ──
+  const updatedWallet = await Wallet.findOneAndUpdate(
+    { user: userId, marketerId },
+    { $inc: { balance: -amountToCharge, totalSpent: amountToCharge } },
+    { new: true },
+  );
+
+  // ── Credit marketer wallet via model method ──
+  // creditWallet handles:
+  //   profitBalance  ↑ by marketerProfit
+  //   totalProfit    ↑ by marketerProfit  (all-time tracker)
+  //   totalBalance   ↑ synced automatically (_syncTotalBalance)
+  //   stats.totalTransactions ↑ by 1
+  //   stats.totalVolume       ↑ by amountToCharge
+  if (marketerProfit > 0) {
+    const marketer = await Marketer.findById(marketerId);
+    if (marketer) {
+      await marketer.creditWallet(marketerProfit, amountToCharge);
+    }
+  }
+
+  return updatedWallet;
+};
+
+/*SYNC PLANS WITH VTU PROVIDER  - AUTHOMATIC, ONCE A DAY */
+const syncDataPlansJob = async () => {
+  // same logic as syncDataPlans but no res/req
+  // just the fetch + bulkWrite part
+  const response = await fetch("https://geodnatechsub.com/api/user/", {
+    method: "GET",
+    headers: { Authorization: `Token ${process.env.API_TOKEN}` },
+  });
+  const result = await response.json();
+  // ... rest of the sync logic
+  console.log("✅ Cron sync complete");
+};
+
+/*SYNC PLANS WITH VTU PROVIDER */
+const syncDataPlans = async (req, res) => {
+  console.log("🔵 syncDataPlans called");
+
+  const CUSTOMER_MARKUP_PERCENT = 10; // ✅ const
+  const RESELLER_MARKUP_PERCENT = 5; // ✅ const
+
+  try {
+    const response = await fetch("https://geodnatechsub.com/api/user/", {
+      method: "GET",
+      headers: {
+        Authorization: `Token ${process.env.API_TOKEN}`, // ✅ Token not Bearer
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      const rawText = await response.text();
+      return res.status(502).json({
+        status: "fail",
+        message: "Provider API error",
+        providerStatus: response.status,
+        providerResponse: rawText,
+      });
+    }
+
+    const result = await response.json();
+
+    if (!result?.Dataplans) {
+      return res.status(500).json({
+        status: "fail",
+        message: "Invalid provider response structure",
+        result,
+      });
+    }
+
+    const transformedPlans = Object.values(result.Dataplans)
+      .flatMap((network) => network.ALL || [])
+      .map((p) => ({
+        providerPlanId: String(p.id),
+        network: p.plan_network,
+        providerNetworkId: p.network,
+        planName: p.plan,
+        planType: p.plan_type,
+        validity: p.month_validate,
+        providerPrice: Number(p.plan_amount),
+        syncedAt: new Date(),
+      }));
+
+    if (!transformedPlans.length) {
+      return res.status(200).json({
+        status: "success",
+        message: "No plans returned from provider",
+        data: [],
+      });
+    }
+
+    // ✅ Aggregation pipeline update — recalculates prices on existing plans
+    const bulkOps = transformedPlans.map((plan) => ({
+      updateOne: {
+        filter: { providerPlanId: plan.providerPlanId },
+        update: [
+          {
+            $set: {
+              network: plan.network,
+              providerNetworkId: plan.providerNetworkId,
+              planName: plan.planName,
+              planType: plan.planType,
+              validity: plan.validity,
+              providerPrice: plan.providerPrice,
+              serviceType: "data",
+              syncedAt: plan.syncedAt,
+              isActive: { $ifNull: ["$isActive", true] },
+              createdAt: { $ifNull: ["$createdAt", new Date()] },
+
+              // Recalculate sellingPrice maintaining same margin
+              sellingPrice: {
+                $cond: {
+                  if: { $gt: ["$sellingPrice", 0] },
+                  then: {
+                    $ceil: {
+                      $multiply: [
+                        plan.providerPrice,
+                        {
+                          $divide: [
+                            "$sellingPrice",
+                            { $ifNull: ["$providerPrice", plan.providerPrice] },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                  else: {
+                    $ceil: {
+                      $multiply: [
+                        plan.providerPrice,
+                        1 + CUSTOMER_MARKUP_PERCENT / 100,
+                      ],
+                    },
+                  },
+                },
+              },
+
+              // Recalculate resellerPrice maintaining same margin
+              resellerPrice: {
+                $cond: {
+                  if: { $gt: ["$resellerPrice", 0] },
+                  then: {
+                    $ceil: {
+                      $multiply: [
+                        plan.providerPrice,
+                        {
+                          $divide: [
+                            "$resellerPrice",
+                            { $ifNull: ["$providerPrice", plan.providerPrice] },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                  else: {
+                    $ceil: {
+                      $multiply: [
+                        plan.providerPrice,
+                        1 + RESELLER_MARKUP_PERCENT / 100,
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        ],
+        upsert: true,
+      },
+    }));
+
+    const bulkResult = await DataPlan.bulkWrite(bulkOps);
+
+    console.log(
+      `✅ Sync complete — inserted: ${bulkResult.upsertedCount}, updated: ${bulkResult.modifiedCount}`,
+    );
+
+    return res.status(200).json({
       status: "success",
-      data: plans,
+      meta: {
+        inserted: bulkResult.upsertedCount,
+        modified: bulkResult.modifiedCount,
+      },
     });
   } catch (error) {
-    console.error("🔥 Fetch data plans error:", error);
-
-    res.status(500).json({
-      status: "fail",
+    console.error("🔥 syncDataPlans ERROR:", error);
+    return res.status(500).json({
+      status: "error",
       message: error.message,
     });
   }
 };
 
-const buyData = async (req, res) => {
+/* ─────────────────────────────────────────────────────────────
+ * GET ALL DATA PLANS
+ * ───────────────────────────────────────────────────────────── */
+const getAllDataPlans = async (req, res) => {
   try {
-    console.log("📥 Buy Data Request Body:", req.body);
-    console.log("👤 Authenticated User:", req.user?._id);
+    console.log("📦 Fetching data plans");
 
-    const { plan, mobile_number, ported_number } = req.body;
-    const userId = req.user._id;
-    const isAdmin = req.user.role === "admin";
-    const isReseller = req.user.role === "reseller";
+    console.log("📦 Fetching data plans");
+    console.log("🏪 req.marketer:", req.marketer?._id || "NULL");
 
-    /* --------------------------------------------------
-     * 1️⃣ Validate request
-     * -------------------------------------------------- */
-    if (!plan || !mobile_number) {
-      console.log("❌ Missing required fields");
-      return res.status(400).json({
-        status: "fail",
-        message: "Missing required fields: plan, mobile_number",
+    const plans = await DataPlan.find({ serviceType: "data", isActive: true })
+      .sort({ network: 1, sellingPrice: 1 })
+      .lean();
+
+    console.log("📊 Plans found:", plans.length); // ← add this
+
+    // ✅ Fetch marketer overrides and merge
+    let overrideMap = {};
+    if (req.marketer) {
+      const overrides = await MarketerPricing.find({
+        marketerId: req.marketer._id,
+      }).lean();
+
+      overrides.forEach((o) => {
+        overrideMap[o.planId.toString()] = o;
       });
     }
 
-    console.log("🔎 Fetching DataPlan with providerPlanId:", plan);
+    const adjustedPlans = plans
+      .map((plan) => {
+        const override = overrideMap[plan._id.toString()];
+        return {
+          ...plan,
+          sellingPrice: override?.sellingPrice ?? plan.sellingPrice,
+          resellerPrice: override?.resellerPrice ?? plan.resellerPrice,
+          isActive: override?.isActive ?? plan.isActive,
+        };
+      })
+      .filter((p) => p.isActive); // hide plans marketer deactivated
 
-    /* --------------------------------------------------
-     * 2️⃣ Fetch Data Plan (SOURCE OF TRUTH)
-     * -------------------------------------------------- */
+    res.status(200).json({ status: "success", data: adjustedPlans });
+  } catch (error) {
+    console.error("🔥 getAllDataPlans error:", error.message);
+    res.status(500).json({ status: "fail", message: error.message });
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────
+ * BUY DATA
+ *
+ * Pricing logic:
+ *  - superadmin/marketer  → providerPrice (no profit)
+ *  - reseller             → resellerPrice, marketerProfit = resellerPrice - providerPrice
+ *  - regular user         → sellingPrice,  marketerProfit = sellingPrice  - providerPrice
+ *
+ * Commission only paid when buyer AND referrer are both resellers.
+ * No marketerMarkup field — marketer sets prices directly on the plan.
+ * ───────────────────────────────────────────────────────────── */
+
+const buyData = async (req, res) => {
+  console.log("\n=== BUY DATA START ===");
+
+  try {
+    const { plan, mobile_number, ported_number } = req.body;
+    const userId = req.user._id;
+    const marketerId = req.marketer._id;
+    const userRole = req.user.role;
+
+    if (!plan || !mobile_number) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Missing required fields: plan, mobile_number.",
+      });
+    }
+
+    /* ── Fetch global plan ── */
     const selectedPlan = await DataPlan.findOne({
-      providerPlanId: Number(plan),
+      providerPlanId: String(plan),
       isActive: true,
     });
-
-    console.log("📦 Selected Plan:", selectedPlan);
 
     if (!selectedPlan) {
       return res.status(400).json({
         status: "fail",
-        message: "Invalid or inactive data plan",
+        message: "Invalid or inactive data plan.",
       });
     }
 
-    let amountToCharge;
-    let profit = 0;
-
-    if (isAdmin) {
-      amountToCharge = selectedPlan.providerPrice;
-      profit = 0;
-    } else if (isReseller) {
-      if (selectedPlan.resellerPrice > selectedPlan.sellingPrice) {
-        throw new Error("Invalid reseller pricing configuration");
-      }
-
-      amountToCharge = selectedPlan.resellerPrice;
-      profit = selectedPlan.sellingPrice - selectedPlan.resellerPrice;
-    } else {
-      amountToCharge = selectedPlan.sellingPrice;
-      profit = 0;
-    }
-
-    console.log("🧮 Pricing Decision:", {
-      role: req.user.role,
-      amountToCharge,
-      profit,
+    /* ── Apply marketer pricing override ──
+     *
+     * Marketer may have set custom sellingPrice/resellerPrice
+     * via MarketerPricing. Use those if they exist, otherwise
+     * fall back to the global DataPlan prices.
+     */
+    const marketerPricing = await MarketerPricing.findOne({
+      marketerId,
+      planId: selectedPlan._id,
     });
 
-    /* --------------------------------------------------
-     * 3️⃣ Check Wallet Balance
-     * -------------------------------------------------- */
-    const wallet = await Wallet.findOne({ user: userId });
+    const sellingPrice =
+      marketerPricing?.sellingPrice ?? selectedPlan.sellingPrice;
+    const resellerPrice =
+      marketerPricing?.resellerPrice ?? selectedPlan.resellerPrice;
+    const planIsActive = marketerPricing?.isActive ?? selectedPlan.isActive;
 
-    console.log("👛 Wallet:", wallet);
-
-    if (!wallet) {
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found",
-      });
-    }
-
-    if (wallet.balance < amountToCharge) {
-      console.log("❌ Insufficient wallet balance");
+    // ✅ Respect marketer's per-plan activation toggle
+    if (!planIsActive) {
       return res.status(400).json({
         status: "fail",
-        message: `Insufficient balance. Available ₦${wallet.balance}, Required ₦${amountToCharge}`,
+        message: "This plan is not available on your platform.",
       });
     }
 
-    /* --------------------------------------------------
-     * 4️⃣ Create Pending Transaction
-     * -------------------------------------------------- */
-    const reference = `DATA_${Date.now()}_${userId.toString().slice(-6)}`;
-    // const reference = `AIRTIME_${Date.now()}_${userId.toString().slice(-6)}`;
+    console.log("🔵 Plan pricing resolved:", {
+      globalSellingPrice: selectedPlan.sellingPrice,
+      globalResellerPrice: selectedPlan.resellerPrice,
+      resolvedSellingPrice: sellingPrice,
+      resolvedResellerPrice: resellerPrice,
+      hasOverride: !!marketerPricing,
+    });
+
+    /* ── Pricing decision ──
+     *
+     * providerPrice  = what we pay the VTU API (always from global plan)
+     * marketerProfit = what the marketer earns on this transaction
+     * resellerProfit = discount benefit the reseller gets vs regular price
+     * amountToCharge = what the buyer's wallet is debited
+     *
+     * superadmin/marketer → providerPrice  (no profit)
+     * reseller            → resellerPrice  (marketerProfit = resellerPrice - providerPrice)
+     * regular user        → sellingPrice   (marketerProfit = sellingPrice  - providerPrice)
+     */
+    let amountToCharge;
+    let marketerProfit = 0;
+    let resellerProfit = 0;
+
+    if (["superadmin", "marketer"].includes(userRole)) {
+      amountToCharge = selectedPlan.providerPrice;
+      marketerProfit = 0;
+      resellerProfit = 0;
+    } else if (userRole === "reseller") {
+      amountToCharge = resellerPrice;
+      marketerProfit = resellerPrice - selectedPlan.providerPrice;
+      resellerProfit = sellingPrice - resellerPrice;
+    } else {
+      // Regular user
+      amountToCharge = sellingPrice;
+      marketerProfit = sellingPrice - selectedPlan.providerPrice;
+      resellerProfit = 0;
+    }
+
+    // ✅ Guard against negative profit from bad pricing config
+    if (marketerProfit < 0) {
+      console.warn("⚠️ Negative marketerProfit — check plan pricing:", {
+        providerPrice: selectedPlan.providerPrice,
+        resellerPrice,
+        sellingPrice,
+        userRole,
+      });
+      marketerProfit = 0;
+    }
+
+    console.log("🧮 Pricing:", {
+      role: userRole,
+      providerPrice: selectedPlan.providerPrice,
+      resellerPrice,
+      sellingPrice,
+      amountToCharge,
+      marketerProfit,
+      resellerProfit,
+    });
+
+    /* ── Wallet check ── */
+    const wallet = await getValidWallet(
+      userId,
+      marketerId,
+      amountToCharge,
+      res,
+    );
+    if (!wallet) return;
+
+    /* ── Create pending transaction ── */
+    const { reference, requestId } = generateRefs("DATA", userId);
 
     const transaction = await Transaction.create({
       user: userId,
+      marketerId,
       type: "data",
       phone: mobile_number,
       network: selectedPlan.network,
-      reference,
-      status: "pending",
-      description: `${selectedPlan.planName} for ${mobile_number}`,
       servicePlan: selectedPlan._id,
       amount: amountToCharge,
-      sellingPrice: selectedPlan.sellingPrice,
-      profit,
+      providerPrice: selectedPlan.providerPrice,
+      resellerPrice,
+      sellingPrice,
+      marketerProfit,
+      resellerProfit,
+      profit: marketerProfit,
+      reference,
+      requestId,
+      status: "pending",
+      description: `${selectedPlan.planName} for ${mobile_number}`,
     });
 
-    console.log("🧾 Pending Transaction Created:", transaction._id);
+    console.log("🧾 Pending transaction:", transaction._id);
 
-    /* --------------------------------------------------
-     * 5️⃣ Call VTU Provider
-     * -------------------------------------------------- */
-    const providerPayload = {
-      network: selectedPlan.providerNetworkId,
-      mobile_number,
-      plan: selectedPlan.providerPlanId,
-      Ported_number: ported_number ?? true,
-    };
-
-    console.log("🌐 Calling VTU API with payload:", providerPayload);
-
-    const response = await fetch("https://geodnatechsub.com/api/data/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Token ${process.env.API_TOKEN}`,
-      },
-      body: JSON.stringify(providerPayload),
-    });
-
-    const rawText = await response.text();
-    console.log("📄 VTU RAW RESPONSE:", rawText);
-
+    /* ── Call VTU provider ── */
     let result;
     try {
-      result = JSON.parse(rawText);
-    } catch (err) {
-      throw new Error("VTU returned non-JSON response");
-    }
-
-    /* --------------------------------------------------
-     * 6️⃣ Handle VTU Response
-     * -------------------------------------------------- */
-    if (result.status === "success" || result.Status === "successful") {
-      console.log("✅ VTU Purchase Successful");
-
-      transaction.status = "success";
-      transaction.vtuReference = result.orderid || result.api_response;
-      transaction.vtuResponse = result;
+      result = await callVtuProvider("https://geodnatechsub.com/api/data/", {
+        network: selectedPlan.providerNetworkId,
+        mobile_number,
+        plan: selectedPlan.providerPlanId,
+        Ported_number: ported_number ?? true,
+      });
+    } catch (vtuError) {
+      transaction.status = "failed";
+      transaction.vtuResponse = { error: vtuError.message };
       await transaction.save();
 
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        { user: userId },
-        {
-          $inc: {
-            balance: -amountToCharge,
-            totalSpent: amountToCharge,
-          },
-        },
-        { new: true },
-      );
+      return res.status(502).json({
+        status: "fail",
+        message: "VTU service unreachable.",
+        error: vtuError.message,
+      });
+    }
 
-      const dataSizeGb = extractGB(selectedPlan.planName);
-
-      await applyDataCommission({
-        buyerId: userId,
-        dataSizeGb,
-        transactionId: transaction._id,
+    /* ── Handle result ── */
+    if (isVtuSuccess(result)) {
+      const updatedWallet = await finalizeTransaction({
+        transaction,
+        userId,
+        marketerId,
+        amountToCharge,
+        marketerProfit,
+        vtuResult: result,
       });
 
-      console.log("💳 Wallet Updated:", updatedWallet.balance);
+      /* ── Commission — only when buyer is a reseller ──
+       * applyDataCommission also checks internally that the
+       * referrer is a reseller on the same platform before paying out.
+       */
+      if (userRole === "reseller") {
+        const dataSizeGb = extractGB(selectedPlan.planName);
+        const commissionResult = await applyDataCommission({
+          buyerId: userId,
+          marketerId,
+          dataSizeGb,
+          transactionId: transaction._id,
+        });
+        console.log("💰 Commission result:", commissionResult);
+      }
+
+      console.log("✅ Data purchase successful");
 
       return res.status(200).json({
         status: "success",
-        message: "Data purchase successful",
+        message: "Data purchase successful.",
         data: {
           transaction,
-          wallet: {
-            balance: updatedWallet.balance,
-            totalSpent: updatedWallet.totalSpent,
-          },
+          wallet: { balance: updatedWallet.balance },
         },
       });
     }
 
-    /* --------------------------------------------------
-     * 7️⃣ VTU Failed
-     * -------------------------------------------------- */
-    console.error("❌ VTU Failure:", result);
-
+    /* ── VTU failed ── */
     transaction.status = "failed";
     transaction.vtuResponse = result;
     await transaction.save();
 
     return res.status(400).json({
       status: "fail",
-      message: result.message || "Data purchase failed",
-      error: result,
+      message: result.message || "Data purchase failed.",
     });
   } catch (error) {
-    console.error("🔥 Buy Data Error:", error);
-
-    return res.status(500).json({
-      status: "fail",
-      message: error.message || "Internal server error",
-    });
+    console.error("🔥 buyData error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
+  } finally {
+    console.log("=== BUY DATA END ===\n");
   }
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * BUY AIRTIME
+ *
+ * Changes:
+ *  - marketerId scoped wallet + transaction
+ *  - marketer markup applied
+ *  - requestId added
+ *  - Consistent field names (vtuReference not vtu_reference)
+ * ───────────────────────────────────────────────────────────── */
 const buyAirtime = async (req, res) => {
+  console.log("\n=== BUY AIRTIME START ===");
+
   try {
-    /* --------------------------------------------------
-     * 1️⃣ Extract & log request payload
-     * -------------------------------------------------- */
     const { network, mobile_number, airtime_type, amount } = req.body;
     const userId = req.user._id;
+    const marketerId = req.marketer._id;
+    const userRole = req.user.role;
 
     const rawNetwork = network?.toUpperCase();
-
     const providerNetworkId = NETWORK_MAP[rawNetwork];
 
-    console.log("🔁 Network Mapping:", {
-      rawNetwork,
-      providerNetworkId,
-    });
-
-    console.log("📥 Incoming Payload:", {
-      providerNetworkId,
-      mobile_number,
-      airtime_type,
-      amount,
-    });
-
-    /* --------------------------------------------------
-     * 2️⃣ Validate request payload
-     * -------------------------------------------------- */
     if (!providerNetworkId || !mobile_number || !airtime_type || !amount) {
-      console.error("❌ Validation Error: Missing fields");
-
       return res.status(400).json({
         status: "fail",
         message:
-          "Missing required fields: network, mobile_number, airtime_type, amount",
+          "Missing required fields: network, mobile_number, airtime_type, amount.",
       });
     }
 
-    if (isNaN(amount) || amount <= 0) {
-      console.error("❌ Validation Error: Invalid amount", amount);
-
+    if (isNaN(amount) || Number(amount) <= 0) {
       return res.status(400).json({
         status: "fail",
-        message: "Invalid amount",
+        message: "Invalid amount.",
       });
     }
 
-    /* --------------------------------------------------
-     * 3️⃣ Fetch & validate wallet
-     * -------------------------------------------------- */
-    console.log("🔍 Fetching user wallet...");
-    const wallet = await Wallet.findOne({ user: userId });
+    const baseAmount = Number(amount);
 
-    if (!wallet) {
-      console.error("❌ Wallet not found for user:", userId);
+    /* ── Pricing decision ──
+     *
+     * Regular user        → pays baseAmount (no extra markup)
+     * superadmin/marketer/reseller → also pays baseAmount upfront
+     *   but their actual profit = baseAmount - paid_amount (from VTU response)
+     *   since provider always charges slightly less than baseAmount.
+     *
+     * marketerProfit is calculated after VTU response for privileged roles
+     * and stays 0 for regular users (no markup on airtime for users).
+     */
+    const amountToCharge = baseAmount; // ✅ everyone pays baseAmount upfront
 
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found",
-      });
-    }
+    console.log("🧮 Airtime Pricing:", {
+      role: userRole,
+      baseAmount,
+      amountToCharge,
+    });
 
-    console.log("💰 Wallet balance:", wallet.balance);
+    /* ── Wallet check ── */
+    const wallet = await getValidWallet(
+      userId,
+      marketerId,
+      amountToCharge,
+      res,
+    );
+    if (!wallet) return;
 
-    if (wallet.balance < amount) {
-      console.error("❌ Insufficient balance");
-
-      return res.status(400).json({
-        status: "fail",
-        message: `Insufficient balance. Available ₦${wallet.balance}, Required ₦${amount}`,
-      });
-    }
-
-    /* --------------------------------------------------
-     * 4️⃣ Create pending transaction
-     * -------------------------------------------------- */
-    const reference = `AIRTIME_${Date.now()}_${userId.toString().slice(-6)}`;
-
-    console.log("🧾 Creating pending transaction:", reference);
+    /* ── Create pending transaction ── */
+    const { reference, requestId } = generateRefs("AIRTIME", userId);
 
     const transaction = await Transaction.create({
       user: userId,
+      marketerId,
       type: "airtime",
       phone: mobile_number,
-      network,
-      amount,
+      network: rawNetwork,
+      amount: amountToCharge,
+      providerPrice: baseAmount, // will be updated to paid_amount after VTU
+      sellingPrice: baseAmount,
+      marketerProfit: 0, // calculated after VTU response
+      resellerProfit: 0,
       reference,
+      requestId,
       status: "pending",
-      description: `${airtime_type} airtime purchase for ${mobile_number}`,
+      description: `${airtime_type} airtime ₦${baseAmount} for ${mobile_number}`,
     });
 
-    /* --------------------------------------------------
-     * 5️⃣ Call VTU API
-     * -------------------------------------------------- */
-    try {
-      // const payload = {};
+    console.log("🧾 Pending transaction:", transaction._id);
 
-      console.log("🚀 Calling VTU Airtime API...");
-      const vtuPayload = {
+    /* ── Call VTU provider ── */
+    let result;
+    try {
+      result = await callVtuProvider("https://geodnatechsub.com/api/topup/", {
         network: providerNetworkId,
-        amount: Number(amount),
+        amount: baseAmount,
         mobile_number,
         airtime_type,
         Ported_number: true,
-      };
-
-      console.log("📡 VTU FINAL PAYLOAD:", vtuPayload);
-
-      const response = await fetch("https://geodnatechsub.com/api/topup/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Token ${process.env.API_TOKEN}`,
-        },
-        body: JSON.stringify(vtuPayload),
       });
-
-      const rawText = await response.text();
-      console.log("📩 Raw VTU Response:", rawText);
-
-      let result;
-      try {
-        result = JSON.parse(rawText);
-      } catch (err) {
-        throw new Error("VTU returned non-JSON response");
-      }
-
-      console.log("📊 Parsed VTU Response:", result);
-
-      /* --------------------------------------------------
-       * 6️⃣ Detect VTU failure
-       * -------------------------------------------------- */
-      const isSuccess =
-        result.status === "success" ||
-        result.Status === "successful" ||
-        result.success === true;
-
-      if (!isSuccess) {
-        console.error("❌ VTU rejected request:", result);
-
-        transaction.status = "failed";
-        transaction.vtu_response = result;
-        await transaction.save();
-
-        return res.status(400).json({
-          status: "fail",
-          message:
-            result.message || result.error || "VTU rejected airtime purchase",
-          vtu_error: result,
-        });
-      }
-
-      /* --------------------------------------------------
-       * 7️⃣ VTU success → finalize transaction
-       * -------------------------------------------------- */
-      console.log("✅ VTU airtime purchase successful");
-
-      transaction.status = "success";
-      transaction.vtu_reference = result.orderid || result.api_response;
-      transaction.vtu_response = result;
+    } catch (vtuError) {
+      transaction.status = "failed";
+      transaction.vtuResponse = { error: vtuError.message };
       await transaction.save();
 
-      console.log("💸 Deducting wallet balance...");
+      return res.status(502).json({
+        status: "fail",
+        message: "VTU service unreachable.",
+        error: vtuError.message,
+      });
+    }
 
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        { user: userId },
-        {
-          $inc: {
-            balance: -amount,
-            totalSpent: amount,
-          },
-        },
-        { new: true },
-      );
+    /* ── Handle result ── */
+    if (isVtuSuccess(result)) {
+      /* ── Calculate actual provider cost from VTU response ──
+       *
+       * paid_amount = what provider actually charged (e.g. 97)
+       * baseAmount  = what user requested            (e.g. 100)
+       *
+       * For privileged roles (superadmin/marketer/reseller):
+       *   marketerProfit = baseAmount - paid_amount  (e.g. 100 - 97 = 3)
+       *
+       * For regular users:
+       *   marketerProfit = 0 (no markup on airtime for users)
+       */
+      const paidAmount = parseFloat(result.paid_amount) || baseAmount;
+      let actualAmountToCharge;
+      let marketerProfit = 0;
+      let resellerProfit = 0;
 
-      console.log("💰 New wallet balance:", updatedWallet.balance);
+      if (["superadmin", "marketer"].includes(userRole)) {
+        // Buying at provider cost — no profit for anyone
+        actualAmountToCharge = paidAmount;
+        marketerProfit = 0;
+        resellerProfit = 0;
+      } else if (userRole === "reseller") {
+        // Reseller pays provider cost — pockets the difference themselves
+        actualAmountToCharge = paidAmount;
+        marketerProfit = 0;
+        resellerProfit = baseAmount - paidAmount; // reseller's benefit
+      } else {
+        // Regular user pays full baseAmount — marketer earns the provider discount
+        actualAmountToCharge = baseAmount;
+        marketerProfit = baseAmount - paidAmount;
+        resellerProfit = 0;
+      }
+      console.log("💰 Airtime profit:", {
+        role: userRole,
+        baseAmount,
+        paidAmount,
+        actualAmountToCharge,
+        marketerProfit,
+        resellerProfit,
+      });
+
+      // ✅ Update transaction with actual values
+      transaction.providerPrice = paidAmount;
+      transaction.amount = actualAmountToCharge; // ✅ correct what was charged
+      transaction.marketerProfit = marketerProfit;
+      transaction.resellerProfit = resellerProfit;
+
+      const updatedWallet = await finalizeTransaction({
+        transaction,
+        userId,
+        marketerId,
+        amountToCharge: actualAmountToCharge, // ✅ actual debit amount
+        marketerProfit,
+        vtuResult: result,
+      });
+
+      console.log("✅ Airtime purchase successful");
 
       return res.status(200).json({
         status: "success",
-        message: "Airtime purchase successful",
+        message: "Airtime purchase successful.",
         data: {
-          transaction: {
-            id: transaction._id,
-            reference: transaction.reference,
-            amount: transaction.amount,
-            network: transaction.network,
-            phone: transaction.phone,
-            type: transaction.type,
-            status: transaction.status,
-          },
-          wallet: {
-            balance: updatedWallet.balance,
-            totalSpent: updatedWallet.totalSpent,
-          },
-          vtu_response: result,
+          transaction,
+          wallet: { balance: updatedWallet.balance },
         },
       });
-    } catch (vtuError) {
-      console.error("🔥 VTU API ERROR:", vtuError.message);
-
-      transaction.status = "failed";
-      transaction.vtu_response = {
-        error: vtuError.message,
-        time: new Date(),
-      };
-      await transaction.save();
-
-      return res.status(500).json({
-        status: "fail",
-        message: "Failed to connect to VTU service",
-        error: vtuError.message,
-      });
     }
-  } catch (error) {
-    console.error("🔥 BUY AIRTIME SYSTEM ERROR:", error);
 
-    return res.status(500).json({
+    /* ── VTU failed ── */
+    transaction.status = "failed";
+    transaction.vtuResponse = result;
+    await transaction.save();
+
+    return res.status(400).json({
       status: "fail",
-      message: error.message || "An unexpected error occurred",
+      message: result.message || "Airtime purchase failed.",
     });
+  } catch (error) {
+    console.error("🔥 buyAirtime error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
   } finally {
-    console.log("================ BUY AIRTIME END =================");
+    console.log("=== BUY AIRTIME END ===\n");
   }
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * VALIDATE METER
+ * No changes needed except minor cleanup — no wallet/tx involved
+ * ───────────────────────────────────────────────────────────── */
 const validateMeter = async (req, res) => {
   try {
-    /* --------------------------------------------------
-     * 1️⃣ Extract & log request payload
-     * -------------------------------------------------- */
-    const { disco_name, meter_number, MeterType, amount, customer_number } =
-      req.body;
+    const { disco_name, meter_number, MeterType, amount } = req.body;
 
-    // console.log('📥 New Payload:', payload);
-    const userId = req.user._id;
-
-    /* --------------------------------------------------
-     * 2️⃣ Validate request payload
-     * -------------------------------------------------- */
     if (!disco_name || !meter_number || !MeterType || !amount) {
-      console.error("❌ Validation Error: Missing fields");
-
       return res.status(400).json({
         status: "fail",
         message:
-          "Missing required fields: disco_name, meter_number, MeterType, amount",
+          "Missing required fields: disco_name, meter_number, MeterType, amount.",
       });
     }
 
-    if (isNaN(amount) || amount <= 0) {
-      console.error("❌ Validation Error: Invalid amount", amount);
-
+    if (isNaN(amount) || amount < 500) {
       return res.status(400).json({
         status: "fail",
-        message: "Invalid amount. Minimum = ₦500",
+        message: "Invalid amount. Minimum is ₦500.",
       });
     }
 
-    /* --------------------------------------------------
-     * 3️⃣ Validate meter details
-     * -------------------------------------------------- */
-    try {
-      // console.log("🚀 Calling meter validate API...");
+    const result = await callVtuProvider(
+      `https://geodnatechsub.com/api/validatemeter?meternumber=${meter_number}&disconame=${disco_name}&mtype=${MeterType}`,
+      null,
+      "GET",
+    );
 
-      const response = await fetch(
-        `https://geodnatechsub.com/api/validatemeter?meternumber=${meter_number}&disconame=${disco_name}&mtype=${MeterType}`,
-        {
-          // method: 'POST',
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Token ${process.env.API_TOKEN}`,
-          },
-        },
-      );
-
-      const rawText = await response.text();
-
-      let result;
-      try {
-        result = JSON.parse(rawText);
-      } catch (err) {
-        throw new Error("VTU returned non-JSON response");
-      }
-
-      /* --------------------------------------------------
-       * 6️⃣ Detect VTU failure
-       * -------------------------------------------------- */
-
-      if (result.invalid) {
-        console.error("❌ VTU rejected request:", result);
-
-        return res.status(400).json({
-          status: "fail",
-          message: result.message || result.error || "Meter validation failed",
-          vtu_error: result,
-        });
-      }
-
-      return res.status(200).json({
-        status: true,
-        message: "Meter validated successfully",
-        result,
-      });
-    } catch (vtuError) {
-      console.error("🔥 VTU API ERROR:", vtuError.message);
-      return res.status(500).json({
+    if (result.invalid) {
+      return res.status(400).json({
         status: "fail",
-        message: "Failed to connect to VTU service",
-        error: vtuError.message,
+        message: result.message || "Meter validation failed.",
       });
     }
-  } catch (error) {
-    console.error("🔥 Validation error:", error);
 
-    return res.status(500).json({
-      status: "fail",
-      message: error.message || "An unexpected error occurred",
+    return res.status(200).json({
+      status: "success",
+      message: "Meter validated successfully.",
+      result,
     });
+  } catch (error) {
+    console.error("🔥 validateMeter error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
   }
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * RECHARGE METER
+ *
+ * Changes:
+ *  - marketerId scoped wallet + transaction
+ *  - marketer markup applied
+ *  - requestId added
+ *  - type fixed to "meter_recharge" (matches updated model enum)
+ * ───────────────────────────────────────────────────────────── */
 const rechargeMeter = async (req, res) => {
-  console.log("================= 🔌 METER RECHARGE START =================");
+  console.log("\n=== METER RECHARGE START ===");
 
   try {
-    /** 🔹 RAW REQUEST */
-    console.log("📥 RAW req.body:", req.body);
-    console.log("👤 req.user:", req.user);
-
     const {
       disco_name,
       amount,
@@ -594,21 +862,9 @@ const rechargeMeter = async (req, res) => {
       meter_address,
     } = req.body;
 
-    const userId = req.user?._id;
+    const userId = req.user._id;
+    const marketerId = req.marketer._id;
 
-    /** 🔹 PARSED PAYLOAD */
-    console.log("📦 Parsed Payload:", {
-      disco_name,
-      amount,
-      meter_number,
-      MeterType,
-      customer_number,
-      meter_name,
-      meter_address,
-      userId,
-    });
-
-    /** 🔹 VALIDATION */
     if (
       !disco_name ||
       !meter_number ||
@@ -618,169 +874,104 @@ const rechargeMeter = async (req, res) => {
       !meter_name ||
       !meter_address
     ) {
-      console.error("❌ Validation failed: Missing fields");
-
       return res.status(400).json({
         status: "fail",
         message:
-          "Missing required fields: disco_name, meter_number, amount, customer_number, MeterType, meter_name, meter_address",
-        received: req.body,
+          "Missing required fields: disco_name, meter_number, amount, MeterType, customer_number, meter_name, meter_address.",
       });
     }
 
-    if (isNaN(amount) || amount <= 0) {
-      console.error("❌ Invalid amount:", amount);
-
+    if (isNaN(amount) || amount < 500) {
       return res.status(400).json({
         status: "fail",
-        message: "Invalid amount",
-        receivedAmount: amount,
+        message: "Invalid amount. Minimum electricity recharge is ₦500.",
       });
     }
 
-    /** 🔹 WALLET CHECK */
-    console.log("🔍 Fetching wallet for user:", userId);
+    // ✅ Apply marketer electricity markup
+    const { finalPrice: amountToCharge, markupAmount: marketerMarkup } =
+      req.marketer.calculatePrice(Number(amount), "electricity");
 
-    const wallet = await Wallet.findOne({ user: userId });
+    const marketerProfit = marketerMarkup;
 
-    console.log("💰 Wallet:", wallet);
+    /* ── Wallet check ── */
+    const wallet = await getValidWallet(
+      userId,
+      marketerId,
+      amountToCharge,
+      res,
+    );
+    if (!wallet) return;
 
-    if (!wallet) {
-      console.error("❌ Wallet not found");
-
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found",
-      });
-    }
-
-    if (wallet.balance < amount) {
-      console.error("❌ Insufficient balance");
-
-      return res.status(400).json({
-        status: "fail",
-        message: `Insufficient wallet balance`,
-        available: wallet.balance,
-        required: amount,
-      });
-    }
-
-    /** 🔹 TRANSACTION INIT */
-    const reference = `METER_${Date.now()}_${userId.toString().slice(-6)}`;
-
-    console.log("🧾 Creating pending transaction:", reference);
+    /* ── Create pending transaction ── */
+    const { reference, requestId } = generateRefs("METER", userId);
 
     const transaction = await Transaction.create({
       user: userId,
-      type: "meter recharge",
+      marketerId, // ✅
+      type: "meter_recharge", // ✅ fixed enum
       disco: disco_name,
       meterNumber: meter_number,
-      name: meter_name,
+      customerName: meter_name,
       meterAddress: meter_address,
       phone: customer_number,
-      amount,
+      amount: amountToCharge,
+      providerPrice: Number(amount),
+      marketerMarkup,
+      marketerProfit,
+      sellingPrice: amountToCharge,
       meterType: METERTYPE_MAP[MeterType],
       reference,
+      requestId, // ✅
       status: "pending",
-      description: `${disco_name} Meter recharge for ${meter_number}`,
+      description: `${disco_name} meter recharge for ${meter_number}`,
     });
 
-    console.log("🧾 Transaction created:", transaction._id);
-
-    /** 🔹 VTU API CALL */
-    const vtuPayload = {
-      disco_name,
-      amount,
-      meter_number,
-      MeterType,
-    };
-
-    console.log("🌍 VTU REQUEST PAYLOAD:", vtuPayload);
-    console.log("🔑 Using API TOKEN:", process.env.API_TOKEN ? "YES" : "NO");
-
-    let response;
-    let rawText;
+    /* ── Call VTU ── */
     let result;
-
     try {
-      response = await fetch("https://geodnatechsub.com/api/billpayment/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Token ${process.env.API_TOKEN}`,
+      result = await callVtuProvider(
+        "https://geodnatechsub.com/api/billpayment/",
+        {
+          disco_name,
+          amount: Number(amount), // send base amount to provider
+          meter_number,
+          MeterType,
         },
-        body: JSON.stringify(vtuPayload),
-      });
-
-      console.log("🌐 VTU HTTP STATUS:", response.status);
-
-      rawText = await response.text();
-      console.log("📄 VTU RESPONSE:", rawText);
-
-      if (!rawText || rawText.trim() === "") {
-        throw new Error("Empty response from VTU provider");
-      }
-
-      try {
-        result = JSON.parse(rawText);
-      } catch (parseErr) {
-        console.error("❌ VTU RESPONSE NOT JSON");
-        throw new Error("Invalid VTU JSON response");
-      }
-    } catch (networkErr) {
-      console.error("❌ VTU NETWORK ERROR:", networkErr);
-
+      );
+    } catch (vtuError) {
       transaction.status = "failed";
-      transaction.vtuResponse = {
-        error: networkErr.message,
-        raw: rawText,
-      };
+      transaction.vtuResponse = { error: vtuError.message };
       await transaction.save();
 
       return res.status(502).json({
         status: "fail",
-        message: "VTU service unreachable",
-        error: networkErr.message,
+        message: "VTU service unreachable.",
       });
     }
 
-    console.log("📊 PARSED VTU RESPONSE:", result);
-
-    /** 🔹 VTU RESULT HANDLING */
-    if (result.status === "success" || result.Status === "successful") {
-      console.log("✅ VTU SUCCESS");
-
-      transaction.status = "success";
-      transaction.reference = result.orderid || transaction.reference;
-      transaction.vtuResponse = result;
-      await transaction.save();
-
-      console.log("💸 Deducting wallet balance:", amount);
-
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        { user: userId },
-        { $inc: { balance: -amount, totalSpent: amount } },
-        { new: true },
-      );
-
-      console.log("💰 Wallet after deduction:", updatedWallet);
+    /* ── Handle result ── */
+    if (isVtuSuccess(result)) {
+      const updatedWallet = await finalizeTransaction({
+        transaction,
+        userId,
+        marketerId,
+        amountToCharge,
+        marketerProfit,
+        platformProfit: 0,
+        vtuResult: result,
+      });
 
       return res.status(200).json({
-        status: true,
-        message: "Meter recharge successful",
+        status: "success",
+        message: "Meter recharge successful.",
         data: {
           transaction,
-          wallet: {
-            balance: updatedWallet.balance,
-            totalSpent: updatedWallet.totalSpent,
-          },
+          wallet: { balance: updatedWallet.balance },
           vtu_response: result,
         },
       });
     }
-
-    /** 🔹 VTU FAILURE */
-    console.error("❌ VTU FAILED RESPONSE");
 
     transaction.status = "failed";
     transaction.vtuResponse = result;
@@ -788,236 +979,70 @@ const rechargeMeter = async (req, res) => {
 
     return res.status(400).json({
       status: "fail",
-      message: result.message || result.Message || "Meter recharge failed",
-      vtu_response: result,
+      message: result.message || "Meter recharge failed.",
     });
   } catch (error) {
-    console.error("🔥 UNHANDLED SERVER ERROR:", error);
-
-    return res.status(500).json({
-      status: "fail",
-      message: error.message || "Internal server error",
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
+    console.error("🔥 rechargeMeter error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
   } finally {
-    console.log("================= 🔌 METER RECHARGE END =================");
+    console.log("=== METER RECHARGE END ===\n");
   }
 };
-// const validateCable = async (req, res) => {
-//   try {
-//     /* --------------------------------------------------
-//      * 1️⃣ Extract & log request payload
-//      * -------------------------------------------------- */
-//     const { cableName, iucNumber } = req.body;
 
-//     console.log("📥 New Payload:", cableName, iucNumber);
-//     const userId = req.user._id;
-
-//     /* --------------------------------------------------
-//      * 2️⃣ Validate request payload
-//      * -------------------------------------------------- */
-//     if (!cableName || !iucNumber) {
-//       console.error("❌ Validation Error: Missing fields");
-
-//       return res.status(400).json({
-//         status: "fail",
-//         message: "Missing required fields: cable name, smart card / IUC number",
-//       });
-//     }
-
-//     // if (isNaN(amount) || amount <= 0) {
-//     //   console.error("❌ Validation Error: Invalid amount", amount);
-
-//     //   return res.status(400).json({
-//     //     status: "fail",
-//     //     message: "Invalid amount. Minimum = ₦500",
-//     //   });
-//     // }
-
-//     /* --------------------------------------------------
-//      * 3️⃣ Validate meter details
-//      * -------------------------------------------------- */
-//     try {
-//       console.log("🚀 Calling meter validate API...");
-
-//       const response = await fetch(
-//         `https://geodnatechsub.com/api/validateiuc?smart_card_number=${iucNumber}&cablename=${cableName}`,
-//         {
-//           // method: 'POST',
-//           headers: {
-//             "Content-Type": "application/json",
-//             Authorization: `Token ${process.env.API_TOKEN}`,
-//           },
-//         }
-//       );
-
-//       const rawText = await response.text();
-
-//       console.log("Raw text", rawText);
-
-//       let result;
-//       try {
-//         result = JSON.parse(rawText);
-//       } catch (err) {
-//         throw new Error("VTU returned non-JSON response");
-//       }
-
-//       /* --------------------------------------------------
-//        * 6️⃣ Detect VTU failure
-//        * -------------------------------------------------- */
-
-//       if (result.invalid) {
-//         console.error("❌ VTU rejected request:", result);
-
-//         return res.status(400).json({
-//           status: "fail",
-//           message: result.message || result.error || "IUC validation failed",
-//           vtu_error: result,
-//         });
-//       }
-
-//       return res.status(200).json({
-//         status: true,
-//         message: "IUC validated successfully",
-//         result,
-//       });
-//     } catch (vtuError) {
-//       console.error("🔥 VTU API ERROR:", vtuError.message);
-//       return res.status(500).json({
-//         status: "fail",
-//         message: "Failed to connect to VTU service",
-//         error: vtuError.message,
-//       });
-//     }
-//   } catch (error) {
-//     console.error("🔥 Validation error:", error);
-
-//     return res.status(500).json({
-//       status: "fail",
-//       message: error.message || "An unexpected error occurred",
-//     });
-//   }
-// };
-
+/* ─────────────────────────────────────────────────────────────
+ * VALIDATE CABLE
+ * No wallet/tx — just a passthrough to VTU. Minor cleanup only.
+ * ───────────────────────────────────────────────────────────── */
 const validateCable = async (req, res) => {
-  console.log("🟢 ===== VALIDATE CABLE START =====");
-
   try {
-    /* --------------------------------------------------
-     * 1️⃣ Extract & log request payload
-     * -------------------------------------------------- */
-    console.log("📥 RAW req.body:", req.body);
-    console.log("📥 RAW req.headers:", req.headers);
-
     const { cableName, iucNumber } = req.body;
-    const userId = req.user?._id;
 
-    console.log("📦 Extracted Payload:", {
-      cableName,
-      iucNumber,
-    });
-
-    console.log("👤 Authenticated User ID:", userId || "NOT FOUND");
-
-    /* --------------------------------------------------
-     * 2️⃣ Validate request payload
-     * -------------------------------------------------- */
     if (!cableName || !iucNumber) {
-      console.error("❌ Validation Error: Missing fields", {
-        cableName,
-        iucNumber,
-      });
-
       return res.status(400).json({
         status: "fail",
-        message: "Missing required fields: cable name, smart card / IUC number",
+        message: "Missing required fields: cableName, iucNumber.",
       });
     }
 
-    /* --------------------------------------------------
-     * 3️⃣ Call VTU IUC validation API
-     * -------------------------------------------------- */
-    try {
-      const vtuUrl = `https://geodnatechsub.com/api/validateiuc?smart_card_number=${iucNumber}&cablename=${cableName}`;
+    const result = await callVtuProvider(
+      `https://geodnatechsub.com/api/validateiuc?smart_card_number=${iucNumber}&cablename=${cableName}`,
+      null,
+      "GET",
+    );
 
-      console.log("🚀 Calling VTU Validate IUC API...");
-      console.log("🌐 VTU URL:", vtuUrl);
-      console.log("🔑 Using API TOKEN:", process.env.API_TOKEN ? "YES" : "NO");
-
-      const response = await fetch(vtuUrl, {
-        headers: {
-          Authorization: `Token ${process.env.API_TOKEN}`,
-        },
-      });
-
-      console.log("🌐 VTU HTTP STATUS:", response.status);
-
-      const rawText = await response.text();
-      console.log("📄 RAW VTU RESPONSE:", rawText);
-
-      let result;
-      try {
-        result = JSON.parse(rawText);
-        console.log("📊 PARSED VTU RESPONSE:", result);
-      } catch (err) {
-        console.error("❌ VTU RESPONSE NOT JSON");
-        throw new Error("VTU returned non-JSON response");
-      }
-
-      /* --------------------------------------------------
-       * 4️⃣ Detect VTU failure
-       * -------------------------------------------------- */
-      if (result.invalid === true) {
-        console.error("❌ VTU rejected request:", result);
-
-        return res.status(400).json({
-          status: "fail",
-          message: result.message || result.error || "IUC validation failed",
-          vtu_error: result,
-        });
-      }
-
-      /* --------------------------------------------------
-       * 5️⃣ Success response
-       * -------------------------------------------------- */
-      console.log("✅ IUC VALIDATION SUCCESS");
-
-      return res.status(200).json({
-        status: true,
-        message: "IUC validated successfully",
-        result,
-      });
-    } catch (vtuError) {
-      console.error("🔥 VTU API ERROR:", vtuError.message);
-      console.error("🔥 VTU STACK TRACE:", vtuError.stack);
-
-      return res.status(500).json({
+    if (result.invalid === true) {
+      return res.status(400).json({
         status: "fail",
-        message: "Failed to connect to VTU service",
-        error: vtuError.message,
+        message: result.message || "IUC validation failed.",
       });
     }
-  } catch (error) {
-    console.error("🔥 CONTROLLER ERROR:", error.message);
-    console.error("🔥 STACK TRACE:", error.stack);
 
-    return res.status(500).json({
-      status: "fail",
-      message: error.message || "An unexpected error occurred",
+    return res.status(200).json({
+      status: "success",
+      message: "IUC validated successfully.",
+      result,
     });
-  } finally {
-    console.log("🟡 ===== VALIDATE CABLE END =====");
+  } catch (error) {
+    console.error("🔥 validateCable error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
   }
 };
 
+/* ─────────────────────────────────────────────────────────────
+ * RECHARGE CABLE
+ *
+ * Changes:
+ *  - Fixed bug: was using undefined `cable` and `iucNumber` variables
+ *    in Transaction.create (now uses `cablename` and `smart_card_number`)
+ *  - marketerId scoped wallet + transaction
+ *  - marketer markup applied
+ *  - requestId added
+ *  - type fixed to "cable_recharge" (matches updated model enum)
+ * ───────────────────────────────────────────────────────────── */
 const rechargeCable = async (req, res) => {
-  console.log("================= 🔌 CABLE RECHARGE START =================");
+  console.log("\n=== CABLE RECHARGE START ===");
 
   try {
-    /** 🔹 RAW REQUEST */
-    console.log("📥 RAW req.body:", req.body);
-    console.log("👤 req.user:", req.user);
-
     const {
       cablename,
       cableplan,
@@ -1027,19 +1052,9 @@ const rechargeCable = async (req, res) => {
       customerNumber,
     } = req.body;
 
-    const userId = req.user?._id;
+    const userId = req.user._id;
+    const marketerId = req.marketer._id;
 
-    /** 🔹 PARSED PAYLOAD */
-    console.log("📦 Parsed Payload:", {
-      cablename,
-      cableplan,
-      smart_card_number,
-      amount,
-      customerName,
-      customerNumber,
-    });
-
-    /** 🔹 VALIDATION */
     if (
       !cablename ||
       !cableplan ||
@@ -1048,162 +1063,100 @@ const rechargeCable = async (req, res) => {
       !customerName ||
       !customerNumber
     ) {
-      console.error("❌ Validation failed: Missing fields");
-
       return res.status(400).json({
         status: "fail",
         message:
-          "Missing required fields: cablename, cableplan,smart_card_number,amount,customerName,customerNumber,",
-        received: req.body,
+          "Missing required fields: cablename, cableplan, smart_card_number, amount, customerName, customerNumber.",
       });
     }
 
     if (isNaN(amount) || amount <= 0) {
-      console.error("❌ Invalid amount:", amount);
-
-      return res.status(400).json({
-        status: "fail",
-        message: "Invalid amount",
-        receivedAmount: amount,
-      });
+      return res
+        .status(400)
+        .json({ status: "fail", message: "Invalid amount." });
     }
 
-    /** 🔹 WALLET CHECK */
-    console.log("🔍 Fetching wallet for user:", userId);
+    // ✅ Apply marketer cable markup
+    const { finalPrice: amountToCharge, markupAmount: marketerMarkup } =
+      req.marketer.calculatePrice(Number(amount), "cable");
 
-    const wallet = await Wallet.findOne({ user: userId });
+    const marketerProfit = marketerMarkup;
 
-    console.log("💰 Wallet:", wallet);
+    /* ── Wallet check ── */
+    const wallet = await getValidWallet(
+      userId,
+      marketerId,
+      amountToCharge,
+      res,
+    );
+    if (!wallet) return;
 
-    if (!wallet) {
-      console.error("❌ Wallet not found");
+    /* ── Create pending transaction ── */
+    const { reference, requestId } = generateRefs("CABLE", userId);
 
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found",
-      });
-    }
-
-    if (wallet.balance < amount) {
-      console.error("❌ Insufficient balance");
-
-      return res.status(400).json({
-        status: "fail",
-        message: `Insufficient wallet balance`,
-        available: wallet.balance,
-        required: amount,
-      });
-    }
-
-    /** 🔹 TRANSACTION INIT */
-    const reference = `CABLE_${Date.now()}_${userId.toString().slice(-6)}`;
-
-    console.log("🧾 Creating pending transaction:", reference);
     const transaction = await Transaction.create({
       user: userId,
-      type: "cable recharge",
-      cable: cablename,
-      IUC: smart_card_number,
-      plan: cableplan,
-      amount,
-      name: customerName,
+      marketerId, // ✅
+      type: "cable_recharge", // ✅ fixed enum
+      cableName: cablename, // ✅ fixed: was `cable` (undefined)
+      smartCardNumber: smart_card_number, // ✅ fixed: was `IUC` (not in schema)
       phone: customerNumber,
+      customerName,
+      amount: amountToCharge,
+      providerPrice: Number(amount),
+      marketerMarkup,
+      marketerProfit,
+      sellingPrice: amountToCharge,
       reference,
+      requestId, // ✅
       status: "pending",
-      description: `${cable} Cable recharge OF ${iucNumber} for ${customerName}`,
+      description: `${cablename} cable recharge for ${smart_card_number} (${customerName})`,
     });
 
-    console.log("🧾 Transaction created:", transaction._id);
-
-    /** 🔹 VTU API CALL */
-    const vtuPayload = {
-      cablename,
-      cableplan,
-      smart_card_number,
-    };
-
-    console.log("🌍 VTU REQUEST PAYLOAD:", vtuPayload);
-    console.log("🔑 Using API TOKEN:", process.env.API_TOKEN ? "YES" : "NO");
-
-    let response;
-    let rawText;
+    /* ── Call VTU ── */
     let result;
-
     try {
-      response = await fetch("https://geodnatechsub.com/api/billpayment/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Token ${process.env.API_TOKEN}`,
+      result = await callVtuProvider(
+        "https://geodnatechsub.com/api/billpayment/",
+        {
+          cablename,
+          cableplan,
+          smart_card_number,
         },
-        body: JSON.stringify(vtuPayload),
-      });
-
-      console.log("🌐 VTU HTTP STATUS:", response.status);
-
-      rawText = await response.text();
-      console.log("📄 VTU RESPONSE:", rawText);
-
-      try {
-        result = JSON.parse(rawText);
-      } catch (parseErr) {
-        console.error("❌ VTU RESPONSE NOT JSON");
-        throw new Error("Invalid VTU JSON response");
-      }
-    } catch (networkErr) {
-      console.error("❌ VTU NETWORK ERROR:", networkErr);
-
+      );
+    } catch (vtuError) {
       transaction.status = "failed";
-      transaction.vtuResponse = {
-        error: networkErr.message,
-        raw: rawText,
-      };
+      transaction.vtuResponse = { error: vtuError.message };
       await transaction.save();
 
       return res.status(502).json({
         status: "fail",
-        message: "VTU service unreachable",
-        error: networkErr.message,
+        message: "VTU service unreachable.",
       });
     }
 
-    console.log("📊 PARSED VTU RESPONSE:", result);
-
-    /** 🔹 VTU RESULT HANDLING */
-    if (result.status === "success" || result.Status === "successful") {
-      console.log("✅ VTU SUCCESS");
-
-      transaction.status = "success";
-      transaction.reference = result.orderid || transaction.reference;
-      transaction.vtuResponse = result;
-      await transaction.save();
-
-      console.log("💸 Deducting wallet balance:", amount);
-
-      const updatedWallet = await Wallet.findOneAndUpdate(
-        { user: userId },
-        { $inc: { balance: -amount, totalSpent: amount } },
-        { new: true },
-      );
-
-      console.log("💰 Wallet after deduction:", updatedWallet);
+    /* ── Handle result ── */
+    if (isVtuSuccess(result)) {
+      const updatedWallet = await finalizeTransaction({
+        transaction,
+        userId,
+        marketerId,
+        amountToCharge,
+        marketerProfit,
+        platformProfit: 0,
+        vtuResult: result,
+      });
 
       return res.status(200).json({
-        status: true,
-        message: "Cable recharge successful",
+        status: "success",
+        message: "Cable recharge successful.",
         data: {
           transaction,
-          wallet: {
-            balance: updatedWallet.balance,
-            totalSpent: updatedWallet.totalSpent,
-          },
+          wallet: { balance: updatedWallet.balance },
           vtu_response: result,
         },
       });
     }
-
-    /** 🔹 VTU FAILURE */
-    console.error("❌ VTU FAILED RESPONSE");
 
     transaction.status = "failed";
     transaction.vtuResponse = result;
@@ -1211,23 +1164,137 @@ const rechargeCable = async (req, res) => {
 
     return res.status(400).json({
       status: "fail",
-      message: result.message || result.Message || "Cable recharge failed",
-      vtu_response: result,
+      message: result.message || "Cable recharge failed.",
     });
   } catch (error) {
-    console.error("🔥 UNHANDLED SERVER ERROR:", error);
-
-    return res.status(500).json({
-      status: "fail",
-      message: error.message || "Internal server error",
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
+    console.error("🔥 rechargeCable error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
   } finally {
-    console.log("================= 🔌 CABLE RECHARGE END =================");
+    console.log("=== CABLE RECHARGE END ===\n");
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────
+ * RECHARGE CARD PRINTING
+ *
+ * Changes:
+ *  - marketerId scoped wallet + transaction
+ *  - Uses VTUNG_API_TOKEN (separate provider, kept as-is)
+ * ───────────────────────────────────────────────────────────── */
+const rechargeCardPrinting = async (req, res) => {
+  console.log("\n=== RECHARGE CARD PRINTING START ===");
+
+  try {
+    const { network, amount, quantity } = req.body;
+    const userId = req.user._id;
+    const marketerId = req.marketer._id;
+
+    if (!network || !amount || !quantity) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Missing required fields: network, amount, quantity.",
+      });
+    }
+
+    if (isNaN(amount) || amount <= 0 || isNaN(quantity) || quantity <= 0) {
+      return res
+        .status(400)
+        .json({ status: "fail", message: "Invalid amount or quantity." });
+    }
+
+    const totalAmount = Number(amount) * Number(quantity);
+
+    /* ── Wallet check ── */
+    const wallet = await getValidWallet(userId, marketerId, totalAmount, res);
+    if (!wallet) return;
+
+    /* ── Create pending transaction ── */
+    const { reference, requestId } = generateRefs("RCARD", userId);
+
+    const transaction = await Transaction.create({
+      user: userId,
+      marketerId, // ✅
+      type: "recharge_card_printing",
+      network: network.toUpperCase(),
+      amount: totalAmount,
+      reference,
+      requestId,
+      status: "pending",
+      description: `${quantity} × ₦${amount} ${network} recharge card`,
+    });
+
+    /* ── Call VTU (vtu.ng — different provider) ── */
+    let result;
+    try {
+      const response = await fetch("https://vtu.ng/wp-json/api/v2/epins", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.VTUNG_API_TOKEN}`,
+        },
+        body: JSON.stringify({
+          request_id: requestId,
+          service_id: network,
+          value: amount,
+          quantity,
+        }),
+      });
+
+      const rawText = await response.text();
+      result = JSON.parse(rawText);
+    } catch (vtuError) {
+      transaction.status = "failed";
+      transaction.vtuResponse = { error: vtuError.message };
+      await transaction.save();
+
+      return res.status(502).json({
+        status: "fail",
+        message: "VTU service unreachable.",
+      });
+    }
+
+    /* ── Handle result ── */
+    if (isVtuSuccess(result)) {
+      const updatedWallet = await finalizeTransaction({
+        transaction,
+        userId,
+        marketerId,
+        amountToCharge: totalAmount,
+        marketerProfit: 0,
+        platformProfit: 0,
+        vtuResult: result,
+      });
+
+      return res.status(200).json({
+        status: "success",
+        message: "Recharge card printing successful.",
+        data: {
+          transaction,
+          wallet: { balance: updatedWallet.balance },
+          vtu_response: result,
+        },
+      });
+    }
+
+    transaction.status = "failed";
+    transaction.vtuResponse = result;
+    await transaction.save();
+
+    return res.status(400).json({
+      status: "fail",
+      message: result.message || "Recharge card printing failed.",
+    });
+  } catch (error) {
+    console.error("🔥 rechargeCardPrinting error:", error.message);
+    return res.status(500).json({ status: "fail", message: error.message });
+  } finally {
+    console.log("=== RECHARGE CARD PRINTING END ===\n");
   }
 };
 
 module.exports = {
+  syncDataPlansJob,
+  syncDataPlans,
   getAllDataPlans,
   buyData,
   buyAirtime,
@@ -1235,4 +1302,5 @@ module.exports = {
   rechargeMeter,
   validateCable,
   rechargeCable,
+  rechargeCardPrinting,
 };

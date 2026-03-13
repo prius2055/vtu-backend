@@ -8,15 +8,14 @@ const UserSchema = new mongoose.Schema(
 
     email: {
       type: String,
-      unique: true,
       required: true,
       lowercase: true,
       trim: true,
+      index: true, // ✅ keep for fast lookup, but NOT unique alone
     },
 
     phone: {
       type: String,
-      unique: true,
       required: true,
     },
 
@@ -36,25 +35,59 @@ const UserSchema = new mongoose.Schema(
       default: null,
     },
 
+    /* ─────────────────────────────────────────
+     * MULTI-TENANT LINK
+     * Every user belongs to exactly one marketer.
+     * null = direct platform user (superadmin use only)
+     * ───────────────────────────────────────── */
+    marketerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Marketer",
+      default: null,
+      index: true,
+    },
+
+    /* ─────────────────────────────────────────
+     * ROLES
+     * user        → regular end user
+     * reseller    → user who can resell services
+     * marketer    → affiliate marketer (has own Marketer doc)
+     * superadmin  → platform owner
+     * ───────────────────────────────────────── */
     role: {
       type: String,
-      enum: ["user", "reseller", "admin"],
+      enum: ["user", "reseller", "marketer", "superadmin"],
       default: "user",
       index: true,
     },
 
-    upgradedToResellerAt: {
-      type: Date,
-      default: null,
+    status: {
+      type: String,
+      enum: ["active", "suspended"],
+      default: "active",
+      index: true,
     },
 
-    /* =====================
-       REFERRAL SYSTEM
-    ====================== */
+    upgradedToResellerAt: Date,
 
+    /* ─────────────────────────────────────────
+     * WALLET
+     * ───────────────────────────────────────── */
+    walletBalance: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    /* ─────────────────────────────────────────
+     * REFERRAL SYSTEM
+     * referralCode is unique across the whole platform.
+     * referredBy links to the user who referred them.
+     * ───────────────────────────────────────── */
     referralCode: {
       type: String,
       unique: true,
+      sparse: true, // allows multiple null values safely
       index: true,
     },
 
@@ -64,31 +97,52 @@ const UserSchema = new mongoose.Schema(
       default: null,
     },
 
-    referralsCount: {
-      type: Number,
-      default: 0,
-    },
+    referralsCount: { type: Number, default: 0 },
+    referralEarnings: { type: Number, default: 0 },
+    commissionEarnings: { type: Number, default: 0 },
 
-    referralEarnings: {
-      type: Number,
-      default: 0,
-    },
+    hasFunded: { type: Boolean, default: false },
 
-    commissionEarnings: {
-      type: Number,
-      default: 0,
-    },
-
-    hasFunded: {
-      type: Boolean,
-      default: false,
-    },
-
-    passwordResetToken: String,
-    passwordResetExpires: Date,
+    /* ─────────────────────────────────────────
+     * PASSWORD RESET
+     * ───────────────────────────────────────── */
+    passwordResetToken: { type: String, select: false },
+    passwordResetExpires: { type: Date, select: false },
     passwordChangedAt: Date,
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+  },
 );
+
+/* ─────────────────────────────────────────────────────────────
+ * INDEXES
+ *
+ * Scoped uniqueness: email and phone must be unique PER marketer,
+ * not globally. This means the same email/phone can exist on
+ * different marketer platforms without conflicts.
+ *
+ * NOTE: The old indexes used { store: 1, ... } — replaced with
+ * { marketerId: 1, ... } to match the multi-tenant field.
+ * ───────────────────────────────────────────────────────────── */
+UserSchema.index({ marketerId: 1, email: 1 }, { unique: true });
+UserSchema.index({ marketerId: 1, phone: 1 }, { unique: true });
+UserSchema.index({ marketerId: 1, username: 1 }, { unique: true });
+
+/* ─────────────────────────────────────────────────────────────
+ * METHODS
+ * ───────────────────────────────────────────────────────────── */
+
+// Check if password was changed after a JWT was issued
+UserSchema.methods.passwordChangedAfter = function (JWTTimestamp) {
+  if (this.passwordChangedAt) {
+    const changedTimestamp = parseInt(
+      this.passwordChangedAt.getTime() / 1000,
+      10,
+    );
+    return JWTTimestamp < changedTimestamp;
+  }
+  return false;
+};
 
 module.exports = mongoose.model("User", UserSchema);

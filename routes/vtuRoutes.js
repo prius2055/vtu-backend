@@ -10,7 +10,7 @@ const {
   validateCable,
   rechargeCable,
 } = require("../controllers/vtuController");
-const { protect } = require("../middleware/auth");
+const { protect } = require("../middleware/authMiddleware");
 
 router.get("/data-plans", getAllDataPlans);
 router.post("/buy-data", protect, buyData);
