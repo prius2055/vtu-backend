@@ -94,8 +94,11 @@ const register = async (req, res) => {
     /* =============================
        2. INPUT VALIDATION
     ============================= */
-    const { fullName, username, email, phone, address, password, referrer } =
+    let { fullName, username, email, phone, address, password, referrer } =
       req.body;
+
+    username = username.toLowerCase().trim(); // ✅ before User.create()
+    email = email.toLowerCase().trim();
 
     console.log("🧾 Validating fields...");
 
