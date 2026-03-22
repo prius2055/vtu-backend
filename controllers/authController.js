@@ -1,7 +1,8 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const sgMail = require("@sendgrid/mail");
+// const sgMail = require("@sendgrid/mail");
+const { Resend } = require("resend");
 
 const User = require("../models/userModel");
 const Marketer = require("../models/marketerModel");
@@ -441,14 +442,12 @@ const requestPasswordReset = async (req, res) => {
       });
     }
 
-    // ✅ Scope lookup to marketer so users on different platforms
-    // don't accidentally reset each other's passwords
     const user = await User.findOne({
       email: email.toLowerCase().trim(),
       marketerId: req.marketer?._id || null,
     }).select("+passwordResetToken +passwordResetExpires");
 
-    // Always return success (don't reveal if email exists)
+    // Always return success — don't reveal if email exists
     if (!user) {
       console.log("⚠️ User not found — sending generic success response");
       return res.status(200).json({
@@ -472,31 +471,44 @@ const requestPasswordReset = async (req, res) => {
 
     console.log("💾 Reset token saved");
 
-    // Build reset URL using marketer's domain if available
-    const baseUrl = req.marketer?.domains?.[0]
-      ? `https://${req.marketer.domains[0]}`
-      : process.env.FRONTEND_URL;
+    // Build reset URL — prefer www domain for frontend
+    const frontendDomain =
+      process.env.NODE_ENV === "development"
+        ? req.marketer?.domains?.[0] // e.g. "prince.localhost"
+        : req.marketer?.domains?.find((d) => d.startsWith("www."));
 
-    const resetURL = `${baseUrl}/reset-password/${resetToken}`;
+    const baseUrl =
+      process.env.NODE_ENV === "development"
+        ? `http://${frontendDomain}:3000` // ✅ http + port for dev
+        : `https://${frontendDomain}`; // ✅ https for production
 
+    const resetURL = `${baseUrl}/password/reset/${resetToken}`;
     console.log("🔗 Reset URL:", resetURL);
 
-    // Send via SendGrid
+    // ✅ Send email via Resend — await it directly
     try {
-      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+      const resend = new Resend(process.env.RESEND_API_KEY);
 
-      await sgMail.send({
+      await resend.emails.send({
+        // from:
+        //   process.env.NODE_ENV === "development"
+        //     ? "onboarding@resend.dev" // ✅ no domain verification needed
+        //     : `Subadex <no-reply@subadex.com>`, // ✅ uses verified domain in production
+        from: `Subadex <no-reply@subadex.com>`,
         to: user.email,
-        from: process.env.SENDGRID_FROM_EMAIL || "info@vtvend.com",
-        subject: "Password Reset Request",
-        html: passwordResetEmailTemplate(user.fullName, resetURL),
+        subject: "Reset Your Password",
+        html: passwordResetEmailTemplate(
+          user.fullName,
+          resetURL,
+          req.marketer?.brandName,
+        ),
       });
 
       console.log("✅ Reset email sent to:", user.email);
     } catch (emailError) {
-      console.error("❌ SendGrid error:", emailError.message);
+      console.error("❌ Resend error:", emailError.message);
 
-      // Clear token if email fails so user can retry
+      // Clear token so user can retry
       user.passwordResetToken = undefined;
       user.passwordResetExpires = undefined;
       await user.save({ validateBeforeSave: false });
@@ -507,14 +519,12 @@ const requestPasswordReset = async (req, res) => {
       });
     }
 
-    // ✅ This was missing in your original — response was never sent after sgMail
     res.status(200).json({
       status: "success",
       message: "Password reset link sent to your email.",
     });
   } catch (error) {
     console.error("🔥 requestPasswordReset error:", error.message);
-
     res.status(500).json({
       status: "error",
       message: "Something went wrong. Please try again.",
@@ -531,6 +541,13 @@ const resetPassword = async (req, res) => {
 
     const { token } = req.params;
     const { password, confirmPassword } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Reset token is missing.",
+      });
+    }
 
     if (!password || !confirmPassword) {
       return res.status(400).json({
@@ -564,7 +581,7 @@ const resetPassword = async (req, res) => {
     if (!user) {
       return res.status(400).json({
         status: "fail",
-        message: "Invalid or expired reset token.",
+        message: "Invalid or expired reset token. Please request a new one.",
       });
     }
 
@@ -579,15 +596,16 @@ const resetPassword = async (req, res) => {
 
     console.log("✅ Password updated");
 
-    // Send confirmation email (non-blocking)
+    // Send confirmation email via Resend (non-blocking)
     try {
-      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-      await sgMail.send({
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      await resend.emails.send({
+        from: "Subadex <no-reply@subadex.com>",
         to: user.email,
-        from: process.env.SENDGRID_FROM_EMAIL || "info@vtvend.com",
         subject: "Password Changed Successfully",
         html: passwordChangedEmailTemplate(user.fullName),
       });
+      console.log("✅ Confirmation email sent");
     } catch (emailError) {
       console.warn("⚠️ Failed to send confirmation email:", emailError.message);
       // Don't fail the request if confirmation email fails
@@ -597,7 +615,6 @@ const resetPassword = async (req, res) => {
     createSendToken(user, 200, res);
   } catch (error) {
     console.error("🔥 resetPassword error:", error.message);
-
     res.status(500).json({
       status: "error",
       message: "Failed to reset password. Please try again.",
@@ -606,69 +623,120 @@ const resetPassword = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────────────────
- * EMAIL TEMPLATES
- * Consolidated — all email goes through SendGrid
+ * EMAIL TEMPLATES — Subadex branded
  * ───────────────────────────────────────────────────────────── */
-const passwordResetEmailTemplate = (fullName, resetURL) => `
-  <!DOCTYPE html>
-  <html>
-    <head>
-      <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #2563eb; color: white; padding: 20px; text-align: center; }
-        .content { background-color: #f9fafb; padding: 30px; }
-        .button {
-          display: inline-block;
-          padding: 12px 30px;
-          background-color: #2563eb;
-          color: white;
-          text-decoration: none;
-          border-radius: 5px;
-          margin: 20px 0;
-        }
-        .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 12px; }
-        .warning { color: #dc2626; font-weight: bold; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header"><h1>Password Reset Request</h1></div>
-        <div class="content">
-          <p>Hi ${fullName || "there"},</p>
-          <p>You requested to reset your password. Click the button below:</p>
-          <div style="text-align: center;">
-            <a href="${resetURL}" class="button">Reset Password</a>
-          </div>
-          <p>Or copy this link into your browser:</p>
-          <p style="background-color: #e5e7eb; padding: 10px; word-break: break-all;">${resetURL}</p>
-          <p class="warning">⚠️ This link expires in 10 minutes.</p>
-          <p>If you didn't request this, ignore this email.</p>
-          <p>Thanks,<br>The ${process.env.APP_NAME || "VTU"} Team</p>
+const passwordResetEmailTemplate = (
+  fullName,
+  resetURL,
+  brandName = "Subadex",
+) => `
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body { margin: 0; padding: 0; background: #f7f9f7; font-family: Arial, sans-serif; }
+      .wrapper { max-width: 600px; margin: 0 auto; padding: 32px 16px; }
+      .card { background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2ebe5; }
+      .header { background: #1A3A2A; padding: 32px 24px; text-align: center; border-bottom: 3px solid #C9A84C; }
+      .header h1 { color: #C9A84C; font-size: 22px; margin: 0 0 6px; }
+      .header p { color: rgba(255,255,255,0.75); font-size: 14px; margin: 0; }
+      .body { padding: 32px 28px; }
+      .body p { color: #374151; font-size: 15px; line-height: 1.7; margin: 0 0 16px; }
+      .btn-wrap { text-align: center; margin: 28px 0; }
+      .btn {
+        display: inline-block;
+        padding: 14px 36px;
+        background: #1A3A2A;
+        color: #C9A84C !important;
+        text-decoration: none;
+        border-radius: 8px;
+        font-weight: 700;
+        font-size: 15px;
+        letter-spacing: 0.3px;
+      }
+      .url-box {
+        background: #f7f9f7;
+        border: 1px solid #e2ebe5;
+        border-radius: 6px;
+        padding: 12px;
+        word-break: break-all;
+        font-size: 12px;
+        color: #6b8f78;
+        margin: 0 0 16px;
+      }
+      .warning { color: #dc2626; font-weight: 700; font-size: 14px; }
+      .footer { background: #f7f9f7; padding: 20px 28px; text-align: center; border-top: 1px solid #e2ebe5; }
+      .footer p { color: #9ca3af; font-size: 12px; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="card">
+        <div class="header">
+          <h1>🔐 Password Reset</h1>
+          <p>${brandName} — Secure Account Recovery</p>
         </div>
-        <div class="footer"><p>This is an automated email. Please do not reply.</p></div>
+        <div class="body">
+          <p>Hi <strong>${fullName || "there"}</strong>,</p>
+          <p>We received a request to reset your password. Click the button below to create a new password:</p>
+          <div class="btn-wrap">
+            <a href="${resetURL}" class="btn">Reset My Password</a>
+          </div>
+          <p>Or copy and paste this link into your browser:</p>
+          <div class="url-box">${resetURL}</div>
+          <p class="warning">⚠️ This link expires in 10 minutes.</p>
+          <p>If you didn't request a password reset, you can safely ignore this email — your password will not change.</p>
+          <p>Thanks,<br><strong>The ${brandName} Team</strong></p>
+        </div>
+        <div class="footer">
+          <p>This is an automated message. Please do not reply to this email.</p>
+        </div>
       </div>
-    </body>
-  </html>
+    </div>
+  </body>
+</html>
 `;
 
-const passwordChangedEmailTemplate = (fullName) => `
-  <!DOCTYPE html>
-  <html>
-    <body>
-      <div style="max-width:600px;margin:0 auto;padding:20px;font-family:Arial,sans-serif;">
-        <div style="background-color:#10b981;color:white;padding:20px;text-align:center;">
-          <h1>Password Changed ✓</h1>
+const passwordChangedEmailTemplate = (fullName, brandName = "Subadex") => `
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body { margin: 0; padding: 0; background: #f7f9f7; font-family: Arial, sans-serif; }
+      .wrapper { max-width: 600px; margin: 0 auto; padding: 32px 16px; }
+      .card { background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2ebe5; }
+      .header { background: #1A3A2A; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C9A84C; }
+      .header h1 { color: #C9A84C; font-size: 22px; margin: 0; }
+      .body { padding: 32px 28px; }
+      .body p { color: #374151; font-size: 15px; line-height: 1.7; margin: 0 0 16px; }
+      .alert { background: #eaf7ef; border: 1px solid #6ee7b7; border-radius: 8px; padding: 14px 16px; color: #1A3A2A; font-weight: 600; font-size: 14px; margin-bottom: 16px; }
+      .footer { background: #f7f9f7; padding: 20px 28px; text-align: center; border-top: 1px solid #e2ebe5; }
+      .footer p { color: #9ca3af; font-size: 12px; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="card">
+        <div class="header">
+          <h1>✅ Password Changed</h1>
         </div>
-        <div style="background-color:#f9fafb;padding:30px;">
-          <p>Hi ${fullName || "there"},</p>
-          <p>Your password has been changed successfully.</p>
-          <p>If you didn't make this change, contact our support team immediately.</p>
-          <p>Thanks,<br>The ${process.env.APP_NAME || "VTU"} Team</p>
+        <div class="body">
+          <p>Hi <strong>${fullName || "there"}</strong>,</p>
+          <div class="alert">Your password has been changed successfully.</div>
+          <p>If you made this change, no further action is needed.</p>
+          <p>If you did <strong>not</strong> make this change, please contact our support team immediately as your account may be compromised.</p>
+          <p>Thanks,<br><strong>The ${brandName} Team</strong></p>
+        </div>
+        <div class="footer">
+          <p>This is an automated message. Please do not reply to this email.</p>
         </div>
       </div>
-    </body>
-  </html>
+    </div>
+  </body>
+</html>
 `;
 
 module.exports = {

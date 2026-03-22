@@ -1033,11 +1033,26 @@ const requestWithdrawal = async (req, res) => {
  * 5. GET ALL USERS
  * ───────────────────────────────────────────────────────────── */
 const getUsers = async (req, res) => {
-  try {
-    const { page, limit, skip } = getPagination(req.query);
-    const { search, status, role } = req.query;
-    const marketerId = req.marketer._id;
+  console.log("\n════════════════ GET USERS START ════════════════");
 
+  try {
+    /* ── Pagination ── */
+    const { page, limit, skip } = getPagination(req.query);
+    console.log("📄 Pagination:", { page, limit, skip });
+
+    /* ── Filters ── */
+    const { search, status, role } = req.query;
+    console.log("🔍 Filters received:", {
+      search: search || "none",
+      status: status || "none",
+      role: role || "none",
+    });
+
+    /* ── Marketer scope ── */
+    const marketerId = req.marketer._id;
+    console.log("🏪 Marketer ID:", marketerId);
+
+    /* ── Build query ── */
     const query = { marketerId };
 
     if (status) query.status = status;
@@ -1050,7 +1065,13 @@ const getUsers = async (req, res) => {
         { username: { $regex: search, $options: "i" } },
         { phone: { $regex: search, $options: "i" } },
       ];
+      console.log("🔎 Search applied:", search);
     }
+
+    console.log("📋 Final query:", JSON.stringify(query, null, 2));
+
+    /* ── DB query ── */
+    console.log("⏳ Fetching users from DB...");
 
     const [users, total] = await Promise.all([
       User.find(query)
@@ -1062,13 +1083,29 @@ const getUsers = async (req, res) => {
       User.countDocuments(query),
     ]);
 
+    console.log(`✅ Found ${users.length} users (total matching: ${total})`);
+
+    if (users.length > 0) {
+      console.log(
+        "👥 Sample user IDs:",
+        users.slice(0, 3).map((u) => u._id),
+      );
+    }
+
+    const totalPages = Math.ceil(total / limit);
+    console.log("📊 Pagination meta:", { page, limit, total, totalPages });
+
+    /* ── Response ── */
     res.status(200).json({
       status: "success",
-      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      meta: { page, limit, total, totalPages },
       data: users,
     });
+
+    console.log("════════════════ GET USERS END ════════════════\n");
   } catch (err) {
     console.error("🔥 getUsers error:", err.message);
+    console.error("Stack:", err.stack);
     res.status(500).json({ status: "fail", message: err.message });
   }
 };

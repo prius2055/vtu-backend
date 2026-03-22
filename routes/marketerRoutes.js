@@ -57,7 +57,7 @@ router.get("/dashboard", getDashboard);
 // GET /api/marketer/wallet
 // ─────────────────────────────────────────────
 router.get("/wallet", getWallet);
-router.post("/fund", protectMarketer, fundWallet);
+router.post("/fund", fundWallet);
 router.post("/withdraw", requestWithdrawal);
 
 // ─────────────────────────────────────────────
