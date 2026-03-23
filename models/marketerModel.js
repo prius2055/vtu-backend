@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { encrypt, decrypt } = require("../utils/tokenEncryption");
 
 const marketerSchema = new mongoose.Schema(
   {
@@ -11,7 +12,6 @@ const marketerSchema = new mongoose.Schema(
       trim: true,
     },
 
-    // Link to the User document that owns/manages this marketer account
     marketerDetail: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -51,10 +51,6 @@ const marketerSchema = new mongoose.Schema(
 
     /* =========================
        PRICING (MARKUPS)
-       Kept for backward compat
-       but marketer now sets prices
-       directly via MarketerPricing.
-       These markups are a fallback.
     ========================== */
     pricing: {
       markupType: {
@@ -71,32 +67,13 @@ const marketerSchema = new mongoose.Schema(
 
     /* =========================
        WALLET
-
-       fundingBalance  — money the marketer topped up themselves.
-                         Used for their own purchases at providerPrice.
-                         NOT withdrawable.
-
-       profitBalance   — money earned from platform transactions.
-                         Credited automatically on every successful sale.
-                         This is the ONLY withdrawable amount.
-
-       totalBalance    — fundingBalance + profitBalance.
-                         Always kept in sync — updated whenever either
-                         fundingBalance or profitBalance changes.
-                         Used for quick total balance display.
-
-       totalProfit     — all-time profit earned. Never decreases.
-                         Used for analytics/reporting.
-
-       totalWithdrawn  — all-time amount successfully withdrawn.
-                         Used to verify withdrawal history.
     ========================== */
     wallet: {
       fundingBalance: { type: Number, default: 0 },
       profitBalance: { type: Number, default: 0 },
-      totalBalance: { type: Number, default: 0 }, // fundingBalance + profitBalance
-      totalProfit: { type: Number, default: 0 }, // all-time profit (never decreases)
-      totalWithdrawn: { type: Number, default: 0 }, // all-time withdrawals
+      totalBalance: { type: Number, default: 0 },
+      totalProfit: { type: Number, default: 0 },
+      totalWithdrawn: { type: Number, default: 0 },
     },
 
     /* =========================
@@ -111,8 +88,8 @@ const marketerSchema = new mongoose.Schema(
        LIMITS
     ========================== */
     limits: {
-      dailyTransactionLimit: { type: Number, default: 0 }, // 0 = no limit
-      maxUsers: { type: Number, default: 0 }, // 0 = no limit
+      dailyTransactionLimit: { type: Number, default: 0 },
+      maxUsers: { type: Number, default: 0 },
     },
 
     /* =========================
@@ -126,17 +103,30 @@ const marketerSchema = new mongoose.Schema(
     },
 
     /* =========================
-       ANALYTICS
-       Denormalized counters for
-       fast dashboard reads.
-       Increment alongside each
-       transaction — avoids slow
-       count queries on dashboard.
+       STATS
     ========================== */
     stats: {
       totalUsers: { type: Number, default: 0 },
       totalTransactions: { type: Number, default: 0 },
-      totalVolume: { type: Number, default: 0 }, // total amount processed
+      totalVolume: { type: Number, default: 0 },
+    },
+
+    /* =========================
+       API TOKENS
+       All sensitive tokens stored AES-256 encrypted.
+       select: false — never returned in normal queries.
+       Use .getDecryptedTokens() to read in controllers.
+
+       vtuToken        — VTU provider API token (geodnatechsub etc.)
+       gatewaySecret   — Payment gateway secret key (server-side)
+       gatewayPublic   — Payment gateway public key (client-side, safe to expose)
+       gatewayWebhook  — Payment gateway webhook secret for signature verification
+    ========================== */
+    apiTokens: {
+      vtuToken: { type: String, default: null, select: false },
+      gatewaySecret: { type: String, default: null, select: false },
+      gatewayPublic: { type: String, default: null }, // public — safe to expose
+      gatewayWebhook: { type: String, default: null, select: false },
     },
 
     /* =========================
@@ -158,27 +148,13 @@ const marketerSchema = new mongoose.Schema(
 marketerSchema.index({ domains: 1 });
 
 /* ─────────────────────────────────────────────────────────────
- * HELPER — recalculate totalBalance
- * Called internally after any wallet field changes.
- * Always keeps totalBalance = fundingBalance + profitBalance.
+ * WALLET HELPERS
  * ───────────────────────────────────────────────────────────── */
 marketerSchema.methods._syncTotalBalance = function () {
   this.wallet.totalBalance =
     this.wallet.fundingBalance + this.wallet.profitBalance;
 };
 
-/* ─────────────────────────────────────────────────────────────
- * METHODS
- * ───────────────────────────────────────────────────────────── */
-
-/**
- * Calculate the final price a user pays for a service,
- * based on this marketer's markup settings.
- *
- * @param {number} basePrice   - Platform's cost/base price
- * @param {string} serviceType - 'airtime'|'data'|'cable'|'electricity'|'epin'
- * @returns {{ finalPrice: number, markupAmount: number }}
- */
 marketerSchema.methods.calculatePrice = function (basePrice, serviceType) {
   const serviceMarkupMap = {
     airtime: this.pricing.airtimeMarkup,
@@ -206,78 +182,124 @@ marketerSchema.methods.calculatePrice = function (basePrice, serviceType) {
   };
 };
 
-/**
- * Credit the marketer's profit after a successful user transaction.
- * Called by finalizeTransaction in vtuController.
- *
- * - profitBalance  ↑ by profit  (withdrawable earnings)
- * - totalBalance   ↑ by profit  (kept in sync)
- * - totalProfit    ↑ by profit  (all-time tracker, never decremented)
- * - totalVolume    ↑ by volume  (platform throughput)
- *
- * @param {number} profit  - marketerProfit from the transaction
- * @param {number} volume  - amountToCharge (what the user paid)
- */
 marketerSchema.methods.creditWallet = async function (profit, volume) {
   this.wallet.profitBalance += profit;
   this.wallet.totalProfit += profit;
   this.stats.totalTransactions += 1;
   this.stats.totalVolume += volume;
-  this._syncTotalBalance(); // ✅ keep totalBalance in sync
+  this._syncTotalBalance();
   await this.save();
 };
 
-/**
- * Credit the marketer's fundingBalance when they top up their wallet.
- * Called by the wallet funding verification controller.
- *
- * - fundingBalance ↑ by amount
- * - totalBalance   ↑ by amount (kept in sync)
- *
- * @param {number} amount - amount funded via Paystack
- */
 marketerSchema.methods.creditFunding = async function (amount) {
   this.wallet.fundingBalance += amount;
-  this._syncTotalBalance(); // ✅ keep totalBalance in sync
+  this._syncTotalBalance();
   await this.save();
 };
 
-/**
- * Debit the marketer's fundingBalance for their own purchases.
- * Called when a marketer buys data/airtime at providerPrice.
- *
- * - fundingBalance ↓ by amount
- * - totalBalance   ↓ by amount (kept in sync)
- *
- * @param {number} amount - providerPrice of the plan
- */
 marketerSchema.methods.debitFunding = async function (amount) {
   if (this.wallet.fundingBalance < amount) {
     throw new Error("Insufficient funding balance.");
   }
   this.wallet.fundingBalance -= amount;
-  this._syncTotalBalance(); // ✅ keep totalBalance in sync
+  this._syncTotalBalance();
   await this.save();
 };
 
-/**
- * Process a withdrawal from profitBalance.
- * Called by the withdrawal controller after superadmin approval.
- *
- * - profitBalance  ↓ by amount
- * - totalWithdrawn ↑ by amount (all-time tracker)
- * - totalBalance   ↓ by amount (kept in sync)
- *
- * @param {number} amount - withdrawal amount
- */
 marketerSchema.methods.processWithdrawal = async function (amount) {
   if (this.wallet.profitBalance < amount) {
     throw new Error("Insufficient profit balance.");
   }
   this.wallet.profitBalance -= amount;
   this.wallet.totalWithdrawn += amount;
-  this._syncTotalBalance(); // ✅ keep totalBalance in sync
+  this._syncTotalBalance();
   await this.save();
+};
+
+/* ─────────────────────────────────────────────────────────────
+ * API TOKEN METHODS
+ * ───────────────────────────────────────────────────────────── */
+
+/**
+ * saveApiTokens({ vtuToken, gatewaySecret, gatewayPublic, gatewayWebhook })
+ *
+ * Encrypts sensitive tokens before saving to DB.
+ * Only updates fields that are passed — omitted fields unchanged.
+ *
+ * Usage:
+ *   await marketer.saveApiTokens({ gatewaySecret: "sk_live_xxx" });
+ */
+marketerSchema.methods.saveApiTokens = async function ({
+  vtuToken,
+  gatewaySecret,
+  gatewayPublic,
+  gatewayWebhook,
+} = {}) {
+  if (vtuToken !== undefined) this.apiTokens.vtuToken = encrypt(vtuToken);
+  if (gatewaySecret !== undefined)
+    this.apiTokens.gatewaySecret = encrypt(gatewaySecret);
+  if (gatewayWebhook !== undefined)
+    this.apiTokens.gatewayWebhook = encrypt(gatewayWebhook);
+  if (gatewayPublic !== undefined) this.apiTokens.gatewayPublic = gatewayPublic; // no encryption needed
+
+  await this.save();
+};
+
+/**
+ * getDecryptedTokens()
+ *
+ * Decrypts and returns all API tokens as plain text.
+ * Falls back to process.env values when marketer has no token set.
+ *
+ * ⚠️  Only call in controllers making external API calls.
+ *     Never send the return value to the client.
+ *
+ * Usage:
+ *   const marketer = await Marketer
+ *     .findById(req.marketer._id)
+ *     .select("+apiTokens.vtuToken +apiTokens.gatewaySecret +apiTokens.gatewayWebhook");
+ *
+ *   const { vtuToken, gatewaySecret, gatewayPublic, gatewayWebhook } =
+ *     marketer.getDecryptedTokens();
+ *
+ * Returns:
+ *   {
+ *     vtuToken:       string,  // VTU provider token
+ *     gatewaySecret:  string,  // Payment gateway server-side secret
+ *     gatewayPublic:  string,  // Payment gateway client-side key
+ *     gatewayWebhook: string,  // Payment gateway webhook signing secret
+ *   }
+ */
+marketerSchema.methods.getDecryptedTokens = function () {
+  return {
+    vtuToken: decrypt(this.apiTokens?.vtuToken) || process.env.API_TOKEN,
+    gatewaySecret:
+      decrypt(this.apiTokens?.gatewaySecret) || process.env.PAYSTACK_SECRET_KEY,
+    gatewayPublic:
+      this.apiTokens?.gatewayPublic || process.env.GATEWAY_PUBLIC_KEY,
+    gatewayWebhook:
+      decrypt(this.apiTokens?.gatewayWebhook) ||
+      process.env.GATEWAY_WEBHOOK_SECRET,
+  };
+};
+
+/**
+ * hasOwnTokens()
+ *
+ * Returns booleans indicating which tokens are configured.
+ * Safe to send to the client — no actual token values exposed.
+ *
+ * Usage:
+ *   const tokenStatus = marketer.hasOwnTokens();
+ *   // { hasVtuToken: true, hasGatewaySecret: false, ... }
+ */
+marketerSchema.methods.hasOwnTokens = function () {
+  return {
+    hasVtuToken: !!this.apiTokens?.vtuToken,
+    hasGatewaySecret: !!this.apiTokens?.gatewaySecret,
+    hasGatewayPublic: !!this.apiTokens?.gatewayPublic,
+    hasGatewayWebhook: !!this.apiTokens?.gatewayWebhook,
+  };
 };
 
 module.exports = mongoose.model("Marketer", marketerSchema);

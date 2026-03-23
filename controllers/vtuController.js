@@ -69,12 +69,12 @@ const getValidWallet = async (userId, marketerId, amountNeeded, res) => {
  * Call the VTU provider and return parsed result.
  * Throws on network/parse errors.
  */
-const callVtuProvider = async (url, payload, method = "POST") => {
+const callVtuProvider = async (url, payload, vtuToken, method = "POST") => {
   const response = await fetch(url, {
     method,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Token ${process.env.API_TOKEN}`,
+      Authorization: `Token ${vtuToken}`,
     },
     body: method !== "GET" ? JSON.stringify(payload) : undefined,
   });
@@ -521,14 +521,30 @@ const buyData = async (req, res) => {
     console.log("🧾 Pending transaction:", transaction._id);
 
     /* ── Call VTU provider ── */
+    const marketerWithTokens = await Marketer.findById(marketerId).select(
+      "+apiTokens.vtuToken",
+    );
+
+    const { vtuToken } = marketerWithTokens.getDecryptedTokens();
+    console.log(
+      "🔑 VTU token source:",
+      marketerWithTokens.apiTokens?.vtuToken
+        ? "marketer's own token"
+        : "platform fallback",
+    );
+
     let result;
     try {
-      result = await callVtuProvider("https://geodnatechsub.com/api/data/", {
-        network: selectedPlan.providerNetworkId,
-        mobile_number,
-        plan: selectedPlan.providerPlanId,
-        Ported_number: ported_number ?? true,
-      });
+      result = await callVtuProvider(
+        "https://geodnatechsub.com/api/data/",
+        {
+          network: selectedPlan.providerNetworkId,
+          mobile_number,
+          plan: selectedPlan.providerPlanId,
+          Ported_number: ported_number ?? true,
+        },
+        vtuToken,
+      );
     } catch (vtuError) {
       transaction.status = "failed";
       transaction.vtuResponse = { error: vtuError.message };
@@ -684,15 +700,31 @@ const buyAirtime = async (req, res) => {
     console.log("🧾 Pending transaction:", transaction._id);
 
     /* ── Call VTU provider ── */
+    const marketerWithTokens = await Marketer.findById(marketerId).select(
+      "+apiTokens.vtuToken",
+    );
+
+    const { vtuToken } = marketerWithTokens.getDecryptedTokens();
+    console.log(
+      "🔑 VTU token source:",
+      marketerWithTokens.apiTokens?.vtuToken
+        ? "marketer's own token"
+        : "platform fallback",
+    );
+
     let result;
     try {
-      result = await callVtuProvider("https://geodnatechsub.com/api/topup/", {
-        network: providerNetworkId,
-        amount: baseAmount,
-        mobile_number,
-        airtime_type,
-        Ported_number: true,
-      });
+      result = await callVtuProvider(
+        "https://geodnatechsub.com/api/topup/",
+        {
+          network: providerNetworkId,
+          amount: baseAmount,
+          mobile_number,
+          airtime_type,
+          Ported_number: true,
+        },
+        vtuToken,
+      );
     } catch (vtuError) {
       transaction.status = "failed";
       transaction.vtuResponse = { error: vtuError.message };
@@ -815,9 +847,22 @@ const validateMeter = async (req, res) => {
       });
     }
 
+    const marketerWithTokens = await Marketer.findById(marketerId).select(
+      "+apiTokens.vtuToken",
+    );
+
+    const { vtuToken } = marketerWithTokens.getDecryptedTokens();
+    console.log(
+      "🔑 VTU token source:",
+      marketerWithTokens.apiTokens?.vtuToken
+        ? "marketer's own token"
+        : "platform fallback",
+    );
+
     const result = await callVtuProvider(
       `https://geodnatechsub.com/api/validatemeter?meternumber=${meter_number}&disconame=${disco_name}&mtype=${MeterType}`,
       null,
+      vtuToken,
       "GET",
     );
 
@@ -928,6 +973,17 @@ const rechargeMeter = async (req, res) => {
     });
 
     /* ── Call VTU ── */
+    const marketerWithTokens = await Marketer.findById(marketerId).select(
+      "+apiTokens.vtuToken",
+    );
+
+    const { vtuToken } = marketerWithTokens.getDecryptedTokens();
+    console.log(
+      "🔑 VTU token source:",
+      marketerWithTokens.apiTokens?.vtuToken
+        ? "marketer's own token"
+        : "platform fallback",
+    );
     let result;
     try {
       result = await callVtuProvider(
@@ -938,6 +994,7 @@ const rechargeMeter = async (req, res) => {
           meter_number,
           MeterType,
         },
+        vtuToken,
       );
     } catch (vtuError) {
       transaction.status = "failed";
@@ -1004,9 +1061,22 @@ const validateCable = async (req, res) => {
       });
     }
 
+    const marketerWithTokens = await Marketer.findById(marketerId).select(
+      "+apiTokens.vtuToken",
+    );
+
+    const { vtuToken } = marketerWithTokens.getDecryptedTokens();
+    console.log(
+      "🔑 VTU token source:",
+      marketerWithTokens.apiTokens?.vtuToken
+        ? "marketer's own token"
+        : "platform fallback",
+    );
+
     const result = await callVtuProvider(
       `https://geodnatechsub.com/api/validateiuc?smart_card_number=${iucNumber}&cablename=${cableName}`,
       null,
+      vtuToken,
       "GET",
     );
 
@@ -1114,6 +1184,18 @@ const rechargeCable = async (req, res) => {
     });
 
     /* ── Call VTU ── */
+    const marketerWithTokens = await Marketer.findById(marketerId).select(
+      "+apiTokens.vtuToken",
+    );
+
+    const { vtuToken } = marketerWithTokens.getDecryptedTokens();
+    console.log(
+      "🔑 VTU token source:",
+      marketerWithTokens.apiTokens?.vtuToken
+        ? "marketer's own token"
+        : "platform fallback",
+    );
+
     let result;
     try {
       result = await callVtuProvider(
@@ -1123,6 +1205,7 @@ const rechargeCable = async (req, res) => {
           cableplan,
           smart_card_number,
         },
+        vtuToken,
       );
     } catch (vtuError) {
       transaction.status = "failed";
