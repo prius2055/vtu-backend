@@ -127,6 +127,7 @@ const marketerSchema = new mongoose.Schema(
       gatewaySecret: { type: String, default: null, select: false },
       gatewayPublic: { type: String, default: null }, // public — safe to expose
       gatewayWebhook: { type: String, default: null, select: false },
+      paymentPointBusinessId: { type: String, default: null },
     },
 
     /* =========================
@@ -273,13 +274,20 @@ marketerSchema.methods.saveApiTokens = async function ({
 marketerSchema.methods.getDecryptedTokens = function () {
   return {
     vtuToken: decrypt(this.apiTokens?.vtuToken) || process.env.API_TOKEN,
+
     gatewaySecret:
-      decrypt(this.apiTokens?.gatewaySecret) || process.env.PAYSTACK_SECRET_KEY,
+      decrypt(this.apiTokens?.gatewaySecret) || process.env.GATEWAY_SECRET_KEY,
+
     gatewayPublic:
       this.apiTokens?.gatewayPublic || process.env.GATEWAY_PUBLIC_KEY,
+
     gatewayWebhook:
       decrypt(this.apiTokens?.gatewayWebhook) ||
       process.env.GATEWAY_WEBHOOK_SECRET,
+
+    paymentPointBusinessId:
+      this.apiTokens?.paymentPointBusinessId ||
+      process.env.PAYMENTPOINT_BUSINESS_ID,
   };
 };
 

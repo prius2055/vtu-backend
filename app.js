@@ -10,7 +10,7 @@ const marketerRoutes = require("./routes/marketerRoutes");
 const adminMarketerRoutes = require("./routes/adminMarketerRoutes");
 
 const { resolveMarketer } = require("./middleware/marketerMiddleware");
-const { paystackWebhook } = require("./controllers/walletController");
+const { paymentPointWebhook } = require("./controllers/walletController");
 
 const app = express();
 
@@ -29,17 +29,22 @@ app.use(
 );
 
 /* ─────────────────────────────────────────────────────────────
- * 2. PAYSTACK WEBHOOK
+ * 2. PAYMENTPOINT WEBHOOK
  *
  * ⚠️ MUST be registered BEFORE express.json().
- * Paystack signature verification requires the raw request body.
+ * PaymentPoint signature verification requires the raw request body.
  * If express.json() runs first, JSON.stringify(req.body) produces
  * a different string and the HMAC check always fails.
  * ───────────────────────────────────────────────────────────── */
 app.post(
-  "/api/v1/wallet/webhook",
+  "/api/v1/wallet/webhook/:marketerId",
   express.raw({ type: "application/json" }),
-  paystackWebhook,
+  (req, res, next) => {
+    console.log("Webhook route hit");
+    next();
+  },
+
+  paymentPointWebhook,
 );
 
 /* ─────────────────────────────────────────────────────────────

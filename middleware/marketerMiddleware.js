@@ -17,25 +17,19 @@ const Marketer = require("../models/marketerModel");
  * ───────────────────────────────────────────────────────────── */
 const resolveMarketer = async (req, res, next) => {
   try {
-    const host = req.headers.host
-      ?.replace(/:\d+$/, "") // ✅ strip :3000, :5000, any port
-      ?.toLowerCase()
-      ?.trim();
+    const host = req.headers.host?.replace(/:\d+$/, "")?.toLowerCase()?.trim();
 
-    console.log("🌐 resolveMarketer host:", host); // ✅ add this
+    console.log("🌐 resolveMarketer host:", host);
 
     const marketerIdHeader = req.headers["x-marketer-id"];
-
     let marketer = null;
 
-    // Option A: Mobile apps / Postman pass marketer ID in header
+    // Option A: X-Marketer-ID header (Postman / mobile apps)
     if (marketerIdHeader) {
       marketer = await Marketer.findById(marketerIdHeader);
     }
 
     // Option B: Match host against domains[] array
-    // Works for both custom domains (princevtu.com)
-    // and subdomains (prince.mainplatform.com)
     if (!marketer && host) {
       marketer = await Marketer.findOne({
         domains: host,
@@ -43,8 +37,17 @@ const resolveMarketer = async (req, res, next) => {
       });
     }
 
-    // If marketer is in maintenance mode, block all non-admin requests
-    if (marketer?.settings?.maintenanceMode) {
+    // Block unregistered domains
+    if (!marketer) {
+      console.log("🚫 No marketer found for host:", host);
+      return res.status(403).json({
+        status: "fail",
+        message: "No platform found for this domain.",
+      });
+    }
+
+    // Block maintenance mode
+    if (marketer.settings?.maintenanceMode) {
       return res.status(503).json({
         status: "fail",
         message:
@@ -52,7 +55,7 @@ const resolveMarketer = async (req, res, next) => {
       });
     }
 
-    req.marketer = marketer || null;
+    req.marketer = marketer;
     next();
   } catch (err) {
     console.error("🔥 resolveMarketer error:", err.message);

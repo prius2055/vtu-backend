@@ -34,7 +34,6 @@
 // const Wallet = mongoose.model("Wallet", WalletSchema);
 // module.exports = Wallet;
 
-
 const mongoose = require("mongoose");
 
 const WalletSchema = new mongoose.Schema(
@@ -93,6 +92,15 @@ const WalletSchema = new mongoose.Schema(
       default: 0,
     },
 
+    virtualAccounts: [
+      {
+        bankName: { type: String },
+        accountNumber: { type: String },
+        accountName: { type: String },
+        reservedAccountId: { type: String },
+      },
+    ],
+
     /* ─────────────────────────────
      * STATUS
      *
@@ -110,7 +118,7 @@ const WalletSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 /* ─────────────────────────────────────────────────────────────
