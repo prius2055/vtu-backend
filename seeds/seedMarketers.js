@@ -384,6 +384,7 @@ const createMarketer = async ({ marketer: marketerData, owner: ownerData }) => {
           pricing: marketerData.pricing,
           commission: marketerData.commission,
           settings: marketerData.settings,
+          marketerDetail: owner._id,
           ...encryptedTokens,
         },
       },
