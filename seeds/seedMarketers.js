@@ -55,12 +55,11 @@ const MARKETERS = [
         maintenanceMode: false,
       },
       apiTokens: {
-        vtuToken: "2434410872493894eadc896a069ab0efdb04427d",
+        vtuToken: "3511591c93907798464ca20ba3bff2b8f0d9a9b1",
         gatewaySecret:
-          "aa6355271d20ea4131b0cf684e9cace204b16bfecfecb9804ac0bd0d18f71317fe6b85faa06133d2572d7f1c809bc2fb2135fbae589bfcc01c12e689",
-        gatewayPublic: "3c20da5ad8b86a742abee5400531e9d5a59857aa",
-        gatewayWebhook: "3c20da5ad8b86a742abee5400531e9d5a59857aa",
-        paymentPointBusinessId: "e33cd05c62fed9fb61b515bb13bb08515b539379",
+          "48c1bccb6bf18a29277c3a582f6d38601eb7fa1274f4c36c6e418d4ead6bc85d836591719f1ea4e153da7abdea4fb2c9199b2fb65e8fed25681cb740",
+        gatewayPublic: "cf84127122feb9cca17eed1f3ea255d77d9c29a4",
+        paymentPointBusinessId: "5bb4ab634c3d8002d696c012159263a65b57d96d",
       },
     },
     owner: {

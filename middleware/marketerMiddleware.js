@@ -17,6 +17,7 @@ const Marketer = require("../models/marketerModel");
  * ───────────────────────────────────────────────────────────── */
 const resolveMarketer = async (req, res, next) => {
   try {
+    console.log("🔍 ALL HEADERS:", JSON.stringify(req.headers, null, 2));
     const host = req.headers.host?.replace(/:\d+$/, "")?.toLowerCase()?.trim();
 
     console.log("🌐 resolveMarketer host:", host);
