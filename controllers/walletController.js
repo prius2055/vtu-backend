@@ -171,21 +171,12 @@ const paymentPointWebhook = async (req, res) => {
     const { gatewayWebhook, gatewaySecret } = marketer.getDecryptedTokens();
 
     /* ── 2. Verify PaymentPoint signature ── */
-
     const rawBody = req.body;
-
-    console.log("WEBHOOK SECRET:", gatewayWebhook);
-    console.log("SECRET KEY:", gatewaySecret);
 
     const calculatedSignature = crypto
       .createHmac("sha256", gatewaySecret)
       .update(rawBody)
       .digest("hex");
-
-    console.log("HEADERS:", req.headers);
-    console.log("RAW BODY:", rawBody.toString());
-    console.log("EXPECTED SIGNATURE:", req.headers["paymentpoint-signature"]);
-    console.log("CALCULATED SIGNATURE:", calculatedSignature);
 
     if (calculatedSignature !== req.headers["paymentpoint-signature"]) {
       console.warn("⚠️ Invalid PaymentPoint signature — rejected");
@@ -205,38 +196,20 @@ const paymentPointWebhook = async (req, res) => {
     }
 
     const amountPaid = event.amount_paid;
-    const settlementAmount = event.settlement_amount; // after PaymentPoint fees
+    const settlementAmount = event.settlement_amount;
     const reference = event.transaction_id;
     const receiverAccount = event.receiver?.account_number;
-    const status = event.transaction_status;
     const transactionId = event.transaction_id;
 
-    console.log("💰 Payment received:", {
-      amountPaid,
-      settlementAmount,
-      reference,
-      receiverAccount,
-      status,
-      transactionId,
-    });
-
     /* ── 4. Look up wallet by virtual account number ── */
-
-    console.log("🔎 Searching wallet with:", {
-      receiverAccount,
-      marketerId,
-    });
-
     const wallet = await Wallet.findOne({
       "virtualAccounts.accountNumber": receiverAccount,
       marketerId,
     });
 
-    console.log("💼 Wallet found:", wallet);
-
     if (!wallet) {
       console.error("❌ No wallet found for account:", receiverAccount);
-      return res.sendStatus(200); // acknowledge to stop retries
+      return res.sendStatus(200);
     }
 
     const userId = wallet.user;
@@ -251,7 +224,7 @@ const paymentPointWebhook = async (req, res) => {
         amount: amountPaid,
         reference: `FUND-${reference}`,
         requestId: `WEBHOOK-${reference}`,
-        status,
+        status: "success",
         description: `Wallet funded via bank transfer ₦${settlementAmount.toLocaleString()}`,
       });
 
@@ -265,10 +238,11 @@ const paymentPointWebhook = async (req, res) => {
     }
 
     /* ── 6. Credit user wallet ── */
+    // ✅ { new: true } returns the updated document with the new balance
     const updatedWallet = await Wallet.findOneAndUpdate(
       { user: userId, marketerId },
       { $inc: { balance: settlementAmount, totalFunded: settlementAmount } },
-      { upsert: true },
+      { new: true }, // ✅ FIXED: returns updated document
     );
 
     console.log("💰 Wallet credited. New balance:", updatedWallet.balance);
@@ -276,15 +250,16 @@ const paymentPointWebhook = async (req, res) => {
     /* ── 7. Mark user as funded ── */
     await User.findByIdAndUpdate(userId, { hasFunded: true });
 
-    /* ── 8. Update marketer revenue stats ── */
-    await Marketer.findByIdAndUpdate(marketerId, {
-      $inc: {
-        "wallet.fundingBalance": settlementAmount,
-        "wallet.totalRevenue": settlementAmount,
-        "stats.totalVolume": settlementAmount,
-        "stats.totalTransactions": 1,
-      },
-    });
+    /* ── 8. Update marketer wallet ── */
+
+    marketer.wallet.fundingBalance += settlementAmount;
+    marketer.stats.totalVolume += settlementAmount;
+    marketer.stats.totalTransactions += 1;
+
+    // keep balances consistent
+    marketer._syncTotalBalance();
+
+    await marketer.save();
 
     console.log("📊 Marketer stats updated");
     console.log("=== PAYMENTPOINT WEBHOOK END ===\n");

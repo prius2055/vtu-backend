@@ -107,8 +107,8 @@ const TransactionSchema = new mongoose.Schema(
     meterAddress: String,
 
     meterType: {
-      type: Number,
-      enum: [1, 2], // 1 = PREPAID, 2 = POSTPAID
+      type: String,
+      enum: ["Prepaid", "Postpaid"],
       required: function () {
         return this.type === "meter_recharge";
       },

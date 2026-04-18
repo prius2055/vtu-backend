@@ -31,7 +31,7 @@ const {
   getWallet,
   fundWallet,
   verifyMarketerFunding,
-  requestWithdrawal,
+  // requestWithdrawal,
 } = require("../controllers/marketerController");
 
 const { protectMarketer } = require("../middleware/authMiddleware");
@@ -58,7 +58,7 @@ router.get("/dashboard", getDashboard);
 // ─────────────────────────────────────────────
 router.get("/wallet", getWallet);
 router.post("/fund", fundWallet);
-router.post("/withdraw", requestWithdrawal);
+// router.post("/withdraw", requestWithdrawal);
 
 // ─────────────────────────────────────────────
 // USER MANAGEMENT

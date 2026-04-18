@@ -96,11 +96,11 @@ const MARKETERS = [
         maintenanceMode: false,
       },
       apiTokens: {
-        vtuToken: null,
-        gatewaySecret: null,
-        gatewayPublic: null,
-        gatewayWebhook: null,
-        paymentPointBusinessId: null,
+        vtuToken: "3511591c93907798464ca20ba3bff2b8f0d9a9b1",
+        gatewaySecret:
+          "48c1bccb6bf18a29277c3a582f6d38601eb7fa1274f4c36c6e418d4ead6bc85d836591719f1ea4e153da7abdea4fb2c9199b2fb65e8fed25681cb740",
+        gatewayPublic: "cf84127122feb9cca17eed1f3ea255d77d9c29a4",
+        paymentPointBusinessId: "5bb4ab634c3d8002d696c012159263a65b57d96d",
       },
     },
     owner: {
@@ -192,6 +192,50 @@ const MARKETERS = [
       phone: "+2347044859310",
       address: "6 Itelorun Close off Adeniyi Jones, Ikeja, Lagos State",
       password: "@Subadex@711", // ← change immediately after seeding
+      role: "marketer",
+    },
+  },
+  {
+    marketer: {
+      name: "Erijane",
+      brandName: "Erijane Data Hub",
+      domains: [
+        "erijanedata.com",
+        "www.erijanedata.com",
+        "api.erijanedata.com",
+      ],
+      status: "active",
+      isDefault: false,
+      pricing: {
+        markupType: "flat",
+        airtimeMarkup: 0,
+        dataMarkup: 0,
+        cableMarkup: 0,
+        electricityMarkup: 0,
+        epinMarkup: 0,
+      },
+      commission: { referralPercent: 0, resellerPercent: 0 },
+      settings: {
+        allowRegistration: true,
+        allowWalletFunding: true,
+        allowWithdrawals: true,
+        maintenanceMode: false,
+      },
+      apiTokens: {
+        vtuToken: "fb09f4ea48adf4be4565c07382c650e22114c29c",
+        gatewaySecret:
+          "baf26956c65ec60dbbc8ec8b6140d938861adab51a09da9dee9da31ec2346bc416b3a51170ca7436651189921d80e250a2ffdc729f4e67d29454b72f",
+        gatewayPublic: "5bbbb22d53fd4140bcba9d3d4d5baa01d9663d1b",
+        paymentPointBusinessId: "900b4d7576b774e3a5415c072db5045e104dca08",
+      },
+    },
+    owner: {
+      fullName: "Blessing Adebayo",
+      username: "erijane_marketer",
+      email: "adebayosamson@gmail.com",
+      phone: "+2347065442300",
+      address: "No 65 Oronna Street Madakeke, Ife, Osun state",
+      password: "Erijane@1411", // ← change immediately after seeding
       role: "marketer",
     },
   },

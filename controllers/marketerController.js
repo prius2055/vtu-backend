@@ -646,6 +646,7 @@ const getDashboard = async (req, res) => {
       recentTransactions,
       earningsByType,
       revenueToday,
+      freshMarketer, // ✅ include here
     ] = await Promise.all([
       User.countDocuments({ marketerId }),
       User.countDocuments({ marketerId, status: "active" }),
@@ -687,31 +688,33 @@ const getDashboard = async (req, res) => {
           },
         },
       ]),
+
+      // ✅ fetch fresh marketer WITH wallet + stats
+      Marketer.findById(marketerId).lean(),
     ]);
 
     console.log("✅ Dashboard data fetched");
     console.log("=== MARKETER DASHBOARD END ===\n");
 
-    // ── Destructure wallet fields for clarity ──
     const {
       fundingBalance,
       profitBalance,
       totalBalance,
       totalProfit,
       totalWithdrawn,
-    } = req.marketer.wallet;
+    } = freshMarketer.wallet;
 
     res.status(200).json({
       status: "success",
       data: {
         marketer: {
-          name: req.marketer.name,
-          brandName: req.marketer.brandName,
-          logo: req.marketer.logo,
-          domains: req.marketer.domains,
-          status: req.marketer.status,
-          pricing: req.marketer.pricing,
-          settings: req.marketer.settings,
+          name: freshMarketer.name,
+          brandName: freshMarketer.brandName,
+          logo: freshMarketer.logo,
+          domains: freshMarketer.domains,
+          status: freshMarketer.status,
+          pricing: freshMarketer.pricing,
+          settings: freshMarketer.settings,
         },
         stats: {
           // ── Users ──
@@ -724,18 +727,18 @@ const getDashboard = async (req, res) => {
           transactionsToday: revenueToday[0]?.count ?? 0,
 
           // ── Wallet ──
-          fundingBalance, // topped up — for own purchases, NOT withdrawable
-          profitBalance, // earned from sales — withdrawable
-          totalBalance, // fundingBalance + profitBalance
-          totalProfit, // all-time profit earned (never decreases)
-          totalWithdrawn, // all-time withdrawn
+          fundingBalance,
+          profitBalance,
+          totalBalance,
+          totalProfit,
+          totalWithdrawn,
 
           // ── Today ──
           profitToday: revenueToday[0]?.totalProfit ?? 0,
           volumeToday: revenueToday[0]?.totalVolume ?? 0,
 
-          // ── Platform volume ──
-          totalVolume: req.marketer.stats.totalVolume,
+          // ✅ ALWAYS from fresh doc
+          totalVolume: freshMarketer.stats.totalVolume,
         },
         earningsByType,
         recentTransactions,
@@ -943,91 +946,91 @@ const verifyMarketerFunding = async (req, res) => {
  *  4. Superadmin pays via bank transfer + marks as paid
  *  5. wallet.totalWithdrawn incremented on confirmation
  * ───────────────────────────────────────────────────────────── */
-const requestWithdrawal = async (req, res) => {
-  try {
-    const { amount, bankName, accountNumber, accountName } = req.body;
-    const marketer = req.marketer;
+// const requestWithdrawal = async (req, res) => {
+//   try {
+//     const { amount, bankName, accountNumber, accountName } = req.body;
+//     const marketer = req.marketer;
 
-    // ── Validate fields ──
-    if (!amount || !bankName || !accountNumber || !accountName) {
-      return res.status(400).json({
-        status: "fail",
-        message:
-          "amount, bankName, accountNumber and accountName are required.",
-      });
-    }
+//     // ── Validate fields ──
+//     if (!amount || !bankName || !accountNumber || !accountName) {
+//       return res.status(400).json({
+//         status: "fail",
+//         message:
+//           "amount, bankName, accountNumber and accountName are required.",
+//       });
+//     }
 
-    const withdrawAmount = Number(amount);
+//     const withdrawAmount = Number(amount);
 
-    if (isNaN(withdrawAmount) || withdrawAmount < 100) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Minimum withdrawal amount is ₦100.",
-      });
-    }
+//     if (isNaN(withdrawAmount) || withdrawAmount < 100) {
+//       return res.status(400).json({
+//         status: "fail",
+//         message: "Minimum withdrawal amount is ₦100.",
+//       });
+//     }
 
-    // ── Check profit balance — NOT operating balance ──
-    if (withdrawAmount > marketer.wallet.profitBalance) {
-      return res.status(400).json({
-        status: "fail",
-        message: `Insufficient profit balance. Available: ₦${marketer.wallet.profitBalance}.`,
-      });
-    }
+//     // ── Check profit balance — NOT operating balance ──
+//     if (withdrawAmount > marketer.wallet.profitBalance) {
+//       return res.status(400).json({
+//         status: "fail",
+//         message: `Insufficient profit balance. Available: ₦${marketer.wallet.profitBalance}.`,
+//       });
+//     }
 
-    // ── Debit profitBalance immediately (reserve funds) ──
-    const updatedMarketer = await Marketer.findByIdAndUpdate(
-      marketer._id,
-      {
-        $inc: {
-          "wallet.profitBalance": -withdrawAmount,
-          // ✅ totalWithdrawn updated only when superadmin marks as paid
-        },
-      },
-      { new: true },
-    );
+//     // ── Debit profitBalance immediately (reserve funds) ──
+//     const updatedMarketer = await Marketer.findByIdAndUpdate(
+//       marketer._id,
+//       {
+//         $inc: {
+//           "wallet.profitBalance": -withdrawAmount,
+//           // ✅ totalWithdrawn updated only when superadmin marks as paid
+//         },
+//       },
+//       { new: true },
+//     );
 
-    // ── Create withdrawal transaction (pending) ──
-    const ts = Date.now();
-    const suffix = marketer._id.toString().slice(-6).toUpperCase();
+//     // ── Create withdrawal transaction (pending) ──
+//     const ts = Date.now();
+//     const suffix = marketer._id.toString().slice(-6).toUpperCase();
 
-    const withdrawal = await Transaction.create({
-      user: marketer.marketerDetail,
-      marketerId: marketer._id,
-      type: "withdrawal",
-      amount: withdrawAmount,
-      providerPrice: 0,
-      sellingPrice: withdrawAmount,
-      marketerProfit: 0,
-      profit: 0,
-      status: "pending",
-      reference: `WD_${ts}_${suffix}`,
-      requestId: `REQWD_${ts}_${suffix}`,
-      description: `Withdrawal request — ${accountName} | ${bankName} | ${accountNumber}`,
-      meta: {
-        bankName,
-        accountNumber,
-        accountName,
-      },
-    });
+//     const withdrawal = await Transaction.create({
+//       user: marketer.marketerDetail,
+//       marketerId: marketer._id,
+//       type: "withdrawal",
+//       amount: withdrawAmount,
+//       providerPrice: 0,
+//       sellingPrice: withdrawAmount,
+//       marketerProfit: 0,
+//       profit: 0,
+//       status: "pending",
+//       reference: `WD_${ts}_${suffix}`,
+//       requestId: `REQWD_${ts}_${suffix}`,
+//       description: `Withdrawal request — ${accountName} | ${bankName} | ${accountNumber}`,
+//       meta: {
+//         bankName,
+//         accountNumber,
+//         accountName,
+//       },
+//     });
 
-    console.log(
-      `💸 Withdrawal requested: ₦${withdrawAmount} by marketer ${marketer._id}`,
-    );
+//     console.log(
+//       `💸 Withdrawal requested: ₦${withdrawAmount} by marketer ${marketer._id}`,
+//     );
 
-    res.status(200).json({
-      status: "success",
-      message:
-        "Withdrawal request submitted. You will be paid within 24 hours.",
-      data: {
-        withdrawal,
-        profitBalance: updatedMarketer.wallet.profitBalance,
-      },
-    });
-  } catch (err) {
-    console.error("🔥 requestWithdrawal error:", err.message);
-    res.status(500).json({ status: "fail", message: err.message });
-  }
-};
+//     res.status(200).json({
+//       status: "success",
+//       message:
+//         "Withdrawal request submitted. You will be paid within 24 hours.",
+//       data: {
+//         withdrawal,
+//         profitBalance: updatedMarketer.wallet.profitBalance,
+//       },
+//     });
+//   } catch (err) {
+//     console.error("🔥 requestWithdrawal error:", err.message);
+//     res.status(500).json({ status: "fail", message: err.message });
+//   }
+// };
 
 /* ─────────────────────────────────────────────────────────────
  * 5. GET ALL USERS
@@ -1388,7 +1391,7 @@ module.exports = {
   getDashboard,
   fundWallet,
   verifyMarketerFunding,
-  requestWithdrawal,
+  // requestWithdrawal,
   getUsers,
   getUser,
   updateUserStatus,
