@@ -76,6 +76,13 @@ const createVirtualAccount = async (req, res) => {
     const { gatewaySecret, gatewayPublic, paymentPointBusinessId } =
       marketerWithTokens.getDecryptedTokens();
 
+    console.log("🔑 gatewaySecret:", gatewaySecret ? "EXISTS" : "UNDEFINED");
+    console.log("🔑 gatewayPublic:", gatewayPublic ? "EXISTS" : "UNDEFINED");
+    console.log(
+      "🔑 raw encrypted:",
+      marketer.apiTokens?.gatewaySecret ? "HAS ENCRYPTED VALUE" : "NULL IN DB",
+    );
+
     console.log("🔑 Using tokens:", {
       hasSecret: !!gatewaySecret,
       hasPublic: !!gatewayPublic,
