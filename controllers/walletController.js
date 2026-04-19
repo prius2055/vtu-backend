@@ -92,6 +92,8 @@ const createVirtualAccount = async (req, res) => {
       hasBusinessId: !!paymentPointBusinessId,
     });
 
+    console.log("🔑 businessId:", paymentPointBusinessId);
+
     /* ── Call PaymentPoint ── */
     const response = await fetch(
       "https://api.paymentpoint.co/api/v1/createVirtualAccount",
