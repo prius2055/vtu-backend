@@ -80,7 +80,9 @@ const createVirtualAccount = async (req, res) => {
     console.log("🔑 gatewayPublic:", gatewayPublic ? "EXISTS" : "UNDEFINED");
     console.log(
       "🔑 raw encrypted:",
-      marketer.apiTokens?.gatewaySecret ? "HAS ENCRYPTED VALUE" : "NULL IN DB",
+      marketerWithTokens.apiTokens?.gatewaySecret
+        ? "HAS ENCRYPTED VALUE"
+        : "NULL IN DB",
     );
 
     console.log("🔑 Using tokens:", {
