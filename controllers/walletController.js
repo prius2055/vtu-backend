@@ -114,6 +114,7 @@ const createVirtualAccount = async (req, res) => {
 
     const data = await response.json();
     console.log("📦 PaymentPoint response:", data.status, data.message);
+    console.log("📦 PaymentPoint full response:", data);
 
     if (data.status !== "success") {
       return res.status(400).json({

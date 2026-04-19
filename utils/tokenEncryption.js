@@ -14,8 +14,6 @@ const ALGORITHM = "aes-256-cbc";
 const IV_LENGTH = 16;
 const KEY = process.env.TOKEN_ENCRYPTION_KEY;
 
-console.log(KEY);
-
 if (!KEY || KEY.length !== 32) {
   console.warn(
     "⚠️  TOKEN_ENCRYPTION_KEY must be exactly 32 characters. " +

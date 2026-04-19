@@ -230,10 +230,10 @@ const MARKETERS = [
       },
     },
     owner: {
-      fullName: "Adebayo",
+      fullName: "Adebayo Samson",
       username: "erijane_marketer",
       email: "adebayosamson@gmail.com",
-      phone: "+2347065442300",
+      phone: "07065442300",
       address: "No 65 Oronna Street Madakeke, Ife, Osun state",
       password: "Erijane@1411", // ← change immediately after seeding
       role: "marketer",
