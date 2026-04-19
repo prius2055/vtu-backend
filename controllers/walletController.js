@@ -143,6 +143,7 @@ const createVirtualAccount = async (req, res) => {
     });
   } catch (error) {
     console.error("🔥 createVirtualAccount ERROR:", error.message);
+    console.error("🔥 FULL STACK:", error.stack); // ✅ ADD THIS
     return res.status(500).json({
       status: "error",
       message: "Failed to create virtual account. Please try again.",
