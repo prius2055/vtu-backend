@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 
 const UserSchema = new mongoose.Schema(
   {
@@ -32,6 +33,26 @@ const UserSchema = new mongoose.Schema(
 
     userImage: {
       type: String,
+      default: null,
+    },
+
+    transactionPin: {
+      type: String,
+      select: false,
+    },
+
+    pinIsSet: {
+      type: Boolean,
+      default: false,
+    },
+
+    pinAttempts: {
+      type: Number,
+      default: 0,
+    },
+
+    pinLockedUntil: {
+      type: Date,
       default: null,
     },
 
@@ -143,6 +164,21 @@ UserSchema.methods.passwordChangedAfter = function (JWTTimestamp) {
     return JWTTimestamp < changedTimestamp;
   }
   return false;
+};
+
+/* ─────────────────────────────────────────
+ * TRANSACTION PIN METHODS
+ * ───────────────────────────────────────── */
+
+// Set PIN (hash it)
+UserSchema.methods.setTransactionPin = async function (pin) {
+  this.transactionPin = await bcrypt.hash(pin, 12);
+  this.pinIsSet = true;
+};
+
+// Compare PIN
+UserSchema.methods.correctPin = async function (enteredPin) {
+  return await bcrypt.compare(enteredPin, this.transactionPin);
 };
 
 module.exports = mongoose.model("User", UserSchema);

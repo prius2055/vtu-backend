@@ -103,11 +103,22 @@ const register = async (req, res) => {
 
     console.log("🧾 Validating fields...");
 
-    if (!fullName || !email || !password || !username || !phone || !address) {
+    const requiredFields = {
+      fullName,
+      email,
+      password,
+      username,
+      phone,
+      address,
+    };
+    const missing = Object.keys(requiredFields).filter(
+      (k) => !requiredFields[k],
+    );
+
+    if (missing.length) {
       return res.status(400).json({
         status: "fail",
-        message:
-          "fullName, email, username, phone, address and password are required.",
+        message: `Missing required fields: ${missing.join(", ")}`,
       });
     }
 
@@ -196,7 +207,7 @@ const register = async (req, res) => {
     }
 
     /* =============================
-       7. CREATE USER
+       5. CREATE USER
     ============================= */
     console.log("👤 Creating user...");
 
@@ -249,11 +260,38 @@ const register = async (req, res) => {
     createSendToken(user, 201, res);
   } catch (err) {
     console.error("\n🔥 REGISTER ERROR:", err.message);
-    console.error("Stack:", err.stack);
 
+    /* ✅ HANDLE DUPLICATE KEY ERROR */
+    if (err.code === 11000) {
+      const fields = Object.keys(err.keyValue);
+
+      let message = "Duplicate value detected.";
+
+      if (fields.includes("email")) message = "Email already exists.";
+      else if (fields.includes("username")) message = "Username already taken.";
+      else if (fields.includes("phone"))
+        message = "Phone number already registered.";
+
+      return res.status(400).json({
+        status: "fail",
+        message,
+      });
+    }
+
+    /* ✅ HANDLE VALIDATION ERROR */
+    if (err.name === "ValidationError") {
+      const errors = Object.values(err.errors).map((e) => e.message);
+
+      return res.status(400).json({
+        status: "fail",
+        message: errors.join(", "),
+      });
+    }
+
+    /* DEFAULT */
     res.status(500).json({
       status: "error",
-      message: "Registration failed. Please try again.",
+      message: err.message || "Registration failed.",
     });
   }
 };

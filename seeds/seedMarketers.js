@@ -95,7 +95,7 @@ const MARKETERS = [
         allowWithdrawals: false,
         maintenanceMode: false,
       },
-     apiTokens: {
+      apiTokens: {
         vtuToken: "fb09f4ea48adf4be4565c07382c650e22114c29c",
         gatewaySecret:
           "baf26956c65ec60dbbc8ec8b6140d938861adab51a09da9dee9da31ec2346bc416b3a51170ca7436651189921d80e250a2ffdc729f4e67d29454b72f",

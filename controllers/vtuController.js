@@ -4,6 +4,7 @@ const DataPlan = require("../models/dataPlanModel");
 const Marketer = require("../models/marketerModel");
 const MarketerPricing = require("../models/marketerPriceModel");
 const { applyDataCommission } = require("../services/commissionService");
+const User = require("../models/userModel");
 
 const NETWORK_MAP = {
   MTN: 1,
@@ -377,7 +378,7 @@ const buyData = async (req, res) => {
   console.log("\n=== BUY DATA START ===");
 
   try {
-    const { plan, mobile_number, ported_number } = req.body;
+    const { plan, mobile_number, pin, ported_number } = req.body;
     const userId = req.user._id;
     const marketerId = req.marketer._id;
     const userRole = req.user.role;
@@ -1326,6 +1327,25 @@ const rechargeCardPrinting = async (req, res) => {
   }
 };
 
+const setPin = async (req, res) => {
+  const { pin, confirmPin } = req.body;
+
+  if (pin !== confirmPin) {
+    return res.status(400).json({ message: "PINs do not match" });
+  }
+
+  if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ message: "PIN must be 4 digits" });
+  }
+
+  const user = await User.findById(req.user.id).select("+transactionPin");
+
+  await user.setTransactionPin(pin); // 👈 MODEL METHOD
+  await user.save();
+
+  res.json({ success: true, message: "PIN set successfully" });
+};
+
 module.exports = {
   syncDataPlansJob,
   syncDataPlans,
@@ -1337,4 +1357,5 @@ module.exports = {
   validateCable,
   rechargeCable,
   rechargeCardPrinting,
+  setPin,
 };
