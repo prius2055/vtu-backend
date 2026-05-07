@@ -16,7 +16,7 @@ const verifyTransactionPin = require("../middleware/verifyTransactionPin");
 
 router.get("/data-plans", getAllDataPlans);
 router.post("/set-pin", protect, setPin);
-router.post("/buy-data", protect, verifyTransactionPin, buyData);
+router.post("/buy-data", protect, buyData);
 router.post("/buy-airtime", protect, verifyTransactionPin, buyAirtime);
 router.post("/validate-meter", protect, verifyTransactionPin, validateMeter);
 router.post("/recharge-meter", protect, verifyTransactionPin, rechargeMeter);
