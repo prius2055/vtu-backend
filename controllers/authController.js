@@ -1,13 +1,15 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-// const sgMail = require("@sendgrid/mail");
-const { Resend } = require("resend");
-
 const User = require("../models/userModel");
 const Marketer = require("../models/marketerModel");
 const Wallet = require("../models/walletModel");
 const { generateReferralCode } = require("../utils/utils.js");
+const {
+  resolveBaseUrl,
+  resolveFromAddress,
+} = require("../utils/passwordResetHelper");
+const { Resend } = require("resend");
 
 /* ─────────────────────────────────────────────────────────────
  * HELPERS
@@ -509,44 +511,31 @@ const requestPasswordReset = async (req, res) => {
 
     console.log("💾 Reset token saved");
 
-    // Build reset URL — prefer www domain for frontend
-    const frontendDomain =
-      process.env.NODE_ENV === "development"
-        ? req.marketer?.domains?.[0] // e.g. "prince.localhost"
-        : req.marketer?.domains?.find((d) => d.startsWith("www."));
-
-    const baseUrl =
-      process.env.NODE_ENV === "development"
-        ? `http://${frontendDomain}:3000` // ✅ http + port for dev
-        : `https://${frontendDomain}`; // ✅ https for production
-
+    const baseUrl = resolveBaseUrl(req.marketer);
     const resetURL = `${baseUrl}/password/reset/${resetToken}`;
     console.log("🔗 Reset URL:", resetURL);
 
-    // ✅ Send email via Resend — await it directly
     try {
       const resend = new Resend(process.env.RESEND_API_KEY);
 
       await resend.emails.send({
-        // from:
-        //   process.env.NODE_ENV === "development"
-        //     ? "onboarding@resend.dev" // ✅ no domain verification needed
-        //     : `Subadex <no-reply@subadex.com>`, // ✅ uses verified domain in production
-        from: `Subadex <no-reply@subadex.com>`,
+        from: resolveFromAddress(req.marketer),
         to: user.email,
         subject: "Reset Your Password",
-        html: passwordResetEmailTemplate(
-          user.fullName,
+        html: passwordResetEmailTemplate({
+          fullName: user.fullName,
           resetURL,
-          req.marketer?.brandName,
-        ),
+          brandName: req.marketer?.brandName,
+          brandColor: req.marketer?.brandColor,
+          brandAccent: req.marketer?.brandAccent,
+          logoUrl: req.marketer?.logoUrl,
+        }),
       });
 
       console.log("✅ Reset email sent to:", user.email);
     } catch (emailError) {
       console.error("❌ Resend error:", emailError.message);
 
-      // Clear token so user can retry
       user.passwordResetToken = undefined;
       user.passwordResetExpires = undefined;
       await user.save({ validateBeforeSave: false });
@@ -581,10 +570,9 @@ const resetPassword = async (req, res) => {
     const { password, confirmPassword } = req.body;
 
     if (!token) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Reset token is missing.",
-      });
+      return res
+        .status(400)
+        .json({ status: "fail", message: "Reset token is missing." });
     }
 
     if (!password || !confirmPassword) {
@@ -595,10 +583,9 @@ const resetPassword = async (req, res) => {
     }
 
     if (password !== confirmPassword) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Passwords do not match.",
-      });
+      return res
+        .status(400)
+        .json({ status: "fail", message: "Passwords do not match." });
     }
 
     if (password.length < 8) {
@@ -608,7 +595,6 @@ const resetPassword = async (req, res) => {
       });
     }
 
-    // Hash incoming token to compare with stored hash
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
     const user = await User.findOne({
@@ -625,7 +611,6 @@ const resetPassword = async (req, res) => {
 
     console.log("✅ Valid token for user:", user._id);
 
-    // Update password
     user.password = await bcrypt.hash(password, 12);
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
@@ -634,22 +619,26 @@ const resetPassword = async (req, res) => {
 
     console.log("✅ Password updated");
 
-    // Send confirmation email via Resend (non-blocking)
+    // Send confirmation email (non-blocking — failure doesn't affect response)
     try {
       const resend = new Resend(process.env.RESEND_API_KEY);
       await resend.emails.send({
-        from: "Subadex <no-reply@subadex.com>",
+        from: resolveFromAddress(req.marketer),
         to: user.email,
         subject: "Password Changed Successfully",
-        html: passwordChangedEmailTemplate(user.fullName),
+        html: passwordChangedEmailTemplate({
+          fullName: user.fullName,
+          brandName: req.marketer?.brandName,
+          brandColor: req.marketer?.brandColor,
+          brandAccent: req.marketer?.brandAccent,
+          logoUrl: req.marketer?.logoUrl,
+        }),
       });
       console.log("✅ Confirmation email sent");
     } catch (emailError) {
       console.warn("⚠️ Failed to send confirmation email:", emailError.message);
-      // Don't fail the request if confirmation email fails
     }
 
-    // Log user in with new token
     createSendToken(user, 200, res);
   } catch (error) {
     console.error("🔥 resetPassword error:", error.message);
@@ -661,13 +650,27 @@ const resetPassword = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────────────────
- * EMAIL TEMPLATES — Subadex branded
+ * EMAIL TEMPLATES
+ * All branding is injected — no hardcoded colors or names.
  * ───────────────────────────────────────────────────────────── */
-const passwordResetEmailTemplate = (
+
+/*
+ * @param {Object} opts
+ * @param {string} opts.fullName
+ * @param {string} opts.resetURL
+ * @param {string} [opts.brandName]      - e.g. "Acme Corp"
+ * @param {string} [opts.brandColor]     - primary bg color, e.g. "#1A3A2A"
+ * @param {string} [opts.brandAccent]    - accent/button color, e.g. "#C9A84C"
+ * @param {string} [opts.logoUrl]        - optional logo image URL
+ */
+const passwordResetEmailTemplate = ({
   fullName,
   resetURL,
-  brandName = "Subadex",
-) => `
+  brandName = process.env.DEFAULT_BRAND_NAME || "Platform",
+  brandColor = process.env.DEFAULT_BRAND_COLOR || "#1f2937",
+  brandAccent = process.env.DEFAULT_BRAND_ACCENT || "#4f46e5",
+  logoUrl,
+}) => `
 <!DOCTYPE html>
 <html>
   <head>
@@ -677,32 +680,22 @@ const passwordResetEmailTemplate = (
       body { margin: 0; padding: 0; background: #f7f9f7; font-family: Arial, sans-serif; }
       .wrapper { max-width: 600px; margin: 0 auto; padding: 32px 16px; }
       .card { background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2ebe5; }
-      .header { background: #1A3A2A; padding: 32px 24px; text-align: center; border-bottom: 3px solid #C9A84C; }
-      .header h1 { color: #C9A84C; font-size: 22px; margin: 0 0 6px; }
+      .header { background: ${brandColor}; padding: 32px 24px; text-align: center; border-bottom: 3px solid ${brandAccent}; }
+      .header h1 { color: ${brandAccent}; font-size: 22px; margin: 0 0 6px; }
       .header p { color: rgba(255,255,255,0.75); font-size: 14px; margin: 0; }
+      .logo { max-height: 48px; margin-bottom: 12px; }
       .body { padding: 32px 28px; }
       .body p { color: #374151; font-size: 15px; line-height: 1.7; margin: 0 0 16px; }
       .btn-wrap { text-align: center; margin: 28px 0; }
       .btn {
-        display: inline-block;
-        padding: 14px 36px;
-        background: #1A3A2A;
-        color: #C9A84C !important;
-        text-decoration: none;
-        border-radius: 8px;
-        font-weight: 700;
-        font-size: 15px;
-        letter-spacing: 0.3px;
+        display: inline-block; padding: 14px 36px;
+        background: ${brandColor}; color: ${brandAccent} !important;
+        text-decoration: none; border-radius: 8px;
+        font-weight: 700; font-size: 15px; letter-spacing: 0.3px;
       }
       .url-box {
-        background: #f7f9f7;
-        border: 1px solid #e2ebe5;
-        border-radius: 6px;
-        padding: 12px;
-        word-break: break-all;
-        font-size: 12px;
-        color: #6b8f78;
-        margin: 0 0 16px;
+        background: #f7f9f7; border: 1px solid #e2ebe5; border-radius: 6px;
+        padding: 12px; word-break: break-all; font-size: 12px; color: #6b8f78; margin: 0 0 16px;
       }
       .warning { color: #dc2626; font-weight: 700; font-size: 14px; }
       .footer { background: #f7f9f7; padding: 20px 28px; text-align: center; border-top: 1px solid #e2ebe5; }
@@ -713,6 +706,7 @@ const passwordResetEmailTemplate = (
     <div class="wrapper">
       <div class="card">
         <div class="header">
+          ${logoUrl ? `<img src="${logoUrl}" alt="${brandName}" class="logo" />` : ""}
           <h1>🔐 Password Reset</h1>
           <p>${brandName} — Secure Account Recovery</p>
         </div>
@@ -737,7 +731,21 @@ const passwordResetEmailTemplate = (
 </html>
 `;
 
-const passwordChangedEmailTemplate = (fullName, brandName = "Subadex") => `
+/*
+ * @param {Object} opts
+ * @param {string} opts.fullName
+ * @param {string} [opts.brandName]
+ * @param {string} [opts.brandColor]
+ * @param {string} [opts.brandAccent]
+ * @param {string} [opts.logoUrl]
+ */
+const passwordChangedEmailTemplate = ({
+  fullName,
+  brandName = process.env.DEFAULT_BRAND_NAME || "Platform",
+  brandColor = process.env.DEFAULT_BRAND_COLOR || "#1f2937",
+  brandAccent = process.env.DEFAULT_BRAND_ACCENT || "#4f46e5",
+  logoUrl,
+}) => `
 <!DOCTYPE html>
 <html>
   <head>
@@ -746,8 +754,9 @@ const passwordChangedEmailTemplate = (fullName, brandName = "Subadex") => `
       body { margin: 0; padding: 0; background: #f7f9f7; font-family: Arial, sans-serif; }
       .wrapper { max-width: 600px; margin: 0 auto; padding: 32px 16px; }
       .card { background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2ebe5; }
-      .header { background: #1A3A2A; padding: 28px 24px; text-align: center; border-bottom: 3px solid #C9A84C; }
-      .header h1 { color: #C9A84C; font-size: 22px; margin: 0; }
+      .header { background: ${brandColor}; padding: 28px 24px; text-align: center; border-bottom: 3px solid ${brandAccent}; }
+      .header h1 { color: ${brandAccent}; font-size: 22px; margin: 0; }
+      .logo { max-height: 48px; margin-bottom: 12px; }
       .body { padding: 32px 28px; }
       .body p { color: #374151; font-size: 15px; line-height: 1.7; margin: 0 0 16px; }
       .alert { background: #eaf7ef; border: 1px solid #6ee7b7; border-radius: 8px; padding: 14px 16px; color: #1A3A2A; font-weight: 600; font-size: 14px; margin-bottom: 16px; }
@@ -759,6 +768,7 @@ const passwordChangedEmailTemplate = (fullName, brandName = "Subadex") => `
     <div class="wrapper">
       <div class="card">
         <div class="header">
+          ${logoUrl ? `<img src="${logoUrl}" alt="${brandName}" class="logo" />` : ""}
           <h1>✅ Password Changed</h1>
         </div>
         <div class="body">
