@@ -21,8 +21,7 @@ const resolveBaseUrl = (marketer) => {
 const resolveFromAddress = (marketer) => {
   const brandName =
     marketer?.brandName || process.env.DEFAULT_BRAND_NAME || "Platform";
-  const sendingDomain =
-    marketer?.emailSendingDomain || process.env.DEFAULT_EMAIL_DOMAIN;
+  const sendingDomain = marketer?.domains?.[0];
   return `${brandName} <no-reply@${sendingDomain}>`;
 };
 
