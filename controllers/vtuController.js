@@ -105,6 +105,37 @@ const isVtuSuccess = (result) =>
 /**
  * Atomically deduct wallet and update marketer stats after VTU success.
  */
+// const finalizeTransaction = async ({
+//   transaction,
+//   userId,
+//   marketerId,
+//   amountToCharge,
+//   marketerProfit,
+//   vtuResult,
+// }) => {
+//   // ── Mark transaction success ──
+//   transaction.status = "success";
+//   transaction.vtuReference = vtuResult.orderid || vtuResult.api_response;
+//   transaction.vtuResponse = vtuResult;
+//   await transaction.save();
+
+//   // ── Deduct user wallet ──
+//   const updatedWallet = await Wallet.findOneAndUpdate(
+//     { user: userId, marketerId },
+//     { $inc: { balance: -amountToCharge, totalSpent: amountToCharge } },
+//     { new: true },
+//   );
+
+//   if (marketerProfit > 0) {
+//     const marketer = await Marketer.findById(marketerId);
+//     if (marketer) {
+//       await marketer.creditWallet(marketerProfit, amountToCharge);
+//     }
+//   }
+
+//   return updatedWallet;
+// };
+
 const finalizeTransaction = async ({
   transaction,
   userId,
@@ -112,31 +143,37 @@ const finalizeTransaction = async ({
   amountToCharge,
   marketerProfit,
   vtuResult,
+  userRole, // ✅ pass this in
 }) => {
-  // ── Mark transaction success ──
   transaction.status = "success";
   transaction.vtuReference = vtuResult.orderid || vtuResult.api_response;
   transaction.vtuResponse = vtuResult;
   await transaction.save();
 
-  // ── Deduct user wallet ──
-  const updatedWallet = await Wallet.findOneAndUpdate(
-    { user: userId, marketerId },
-    { $inc: { balance: -amountToCharge, totalSpent: amountToCharge } },
-    { new: true },
-  );
+  let updatedWallet;
 
-  // ── Credit marketer wallet via model method ──
-  // creditWallet handles:
-  //   profitBalance  ↑ by marketerProfit
-  //   totalProfit    ↑ by marketerProfit  (all-time tracker)
-  //   totalBalance   ↑ synced automatically (_syncTotalBalance)
-  //   stats.totalTransactions ↑ by 1
-  //   stats.totalVolume       ↑ by amountToCharge
-  if (marketerProfit > 0) {
+  if (["superadmin", "marketer"].includes(userRole)) {
+    // ✅ Debit marketer's fundingBalance
     const marketer = await Marketer.findById(marketerId);
     if (marketer) {
-      await marketer.creditWallet(marketerProfit, amountToCharge);
+      await marketer.debitFunding(amountToCharge);
+    }
+    // Return a wallet-shaped object so the response stays consistent
+    updatedWallet = { balance: marketer.wallet.fundingBalance };
+  } else {
+    // Regular user / reseller — debit user wallet
+    updatedWallet = await Wallet.findOneAndUpdate(
+      { user: userId, marketerId },
+      { $inc: { balance: -amountToCharge, totalSpent: amountToCharge } },
+      { new: true },
+    );
+
+    // Credit marketer profit
+    if (marketerProfit > 0) {
+      const marketer = await Marketer.findById(marketerId);
+      if (marketer) {
+        await marketer.creditWallet(marketerProfit, amountToCharge);
+      }
     }
   }
 
@@ -488,13 +525,40 @@ const buyData = async (req, res) => {
     });
 
     /* ── Wallet check ── */
-    const wallet = await getValidWallet(
-      userId,
-      marketerId,
-      amountToCharge,
-      res,
-    );
-    if (!wallet) return;
+
+    let wallet = null;
+
+    if (["superadmin", "marketer"].includes(userRole)) {
+      // ✅ Debit from marketer's fundingBalance instead of user wallet
+      const marketer = await Marketer.findById(marketerId);
+
+      if (!marketer) {
+        return res
+          .status(404)
+          .json({ status: "fail", message: "Marketer not found." });
+      }
+
+      if (marketer.wallet.fundingBalance < amountToCharge) {
+        return res.status(400).json({
+          status: "fail",
+          message: `Insufficient balance. Available ₦${marketer.wallet.fundingBalance.toLocaleString()}, Required ₦${amountToCharge.toLocaleString()}`,
+          available: marketer.wallet.fundingBalance,
+          required: amountToCharge,
+        });
+      }
+    } else {
+      // Regular user / reseller — check user wallet as normal
+      wallet = await getValidWallet(userId, marketerId, amountToCharge, res);
+      if (!wallet) return;
+    }
+
+    // const wallet = await getValidWallet(
+    //   userId,
+    //   marketerId,
+    //   amountToCharge,
+    //   res,
+    // );
+    // if (!wallet) return;
 
     /* ── Create pending transaction ── */
     const { reference, requestId } = generateRefs("DATA", userId);
@@ -567,6 +631,7 @@ const buyData = async (req, res) => {
         amountToCharge,
         marketerProfit,
         vtuResult: result,
+        userRole, // ✅ add this
       });
 
       /* ── Commission — only when buyer is a reseller ──
