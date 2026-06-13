@@ -180,6 +180,30 @@ const finalizeTransaction = async ({
   return updatedWallet;
 };
 
+/*GET VTU PROVIDER RAW RESULT */
+const getProviderRawResult = async (req, res) => {
+  try {
+    const response = await fetch("https://geodnatechsub.com/api/user/", {
+      method: "GET",
+      headers: { Authorization: `Token ${process.env.API_TOKEN}` },
+    });
+    const result = await response.json();
+    console.log("✅ Provider raw result fetched");
+
+    return res.status(200).json({
+      status: "success",
+      message: "Result fetched successfully.",
+      data: result,
+    });
+  } catch (error) {
+    console.error("❌ Error fetching result:", error);
+    return res.status(500).json({
+      status: "fail",
+      message: "Failed to fetch result.",
+    });
+  }
+};
+
 /*SYNC PLANS WITH VTU PROVIDER  - AUTHOMATIC, ONCE A DAY */
 const syncDataPlansJob = async () => {
   // same logic as syncDataPlans but no res/req
@@ -241,14 +265,6 @@ const syncDataPlans = async (req, res) => {
         providerPrice: Number(p.plan_amount),
         syncedAt: new Date(),
       }));
-
-    if (!transformedPlans.length) {
-      return res.status(200).json({
-        status: "success",
-        message: "No plans returned from provider",
-        data: [],
-      });
-    }
 
     // ✅ Aggregation pipeline update — recalculates prices on existing plans
     const bulkOps = transformedPlans.map((plan) => ({
@@ -342,6 +358,7 @@ const syncDataPlans = async (req, res) => {
         inserted: bulkResult.upsertedCount,
         modified: bulkResult.modifiedCount,
       },
+      data: cablePlans,
     });
   } catch (error) {
     console.error("🔥 syncDataPlans ERROR:", error);
@@ -1412,6 +1429,7 @@ const setPin = async (req, res) => {
 };
 
 module.exports = {
+  getProviderRawResult,
   syncDataPlansJob,
   syncDataPlans,
   getAllDataPlans,
