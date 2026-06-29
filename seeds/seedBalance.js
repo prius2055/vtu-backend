@@ -7,7 +7,7 @@ mongoose.connect(process.env.DB).then(async () => {
 
   if (!marketer) return console.log("❌ Marketer not found");
 
-  marketer.wallet.fundingBalance = 100000;
+  marketer.wallet.fundingBalance = 200000;
   marketer._syncTotalBalance();
   await marketer.save();
 
