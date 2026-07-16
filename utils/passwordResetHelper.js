@@ -21,7 +21,7 @@ const resolveBaseUrl = (marketer) => {
 const resolveFromAddress = (marketer) => {
   const brandName =
     marketer?.brandName || process.env.DEFAULT_BRAND_NAME || "Platform";
-  const sendingDomain = marketer?.domains?.[0];
+  const sendingDomain = "erijanedata.com";
   return `${brandName} <no-reply@${sendingDomain}>`;
 };
 
